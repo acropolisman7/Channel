@@ -5,6 +5,8 @@ import os
 import json
 import aiohttp
 import feedparser
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
 from google import genai
@@ -17,9 +19,9 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY")
 
 TARGET_CHANNEL = '@jazebestore'                      # آیدی کانال مقصد شما
 CHANNEL_SIGNATURE = "\n\n🎮 @jazebestore"          # امضای انتهای پست
-CHECK_INTERVAL_SECONDS = 900                        # بررسی سایت‌ها هر ۱۵ دقیقه (۹۰۰ ثانیه)
+CHECK_INTERVAL_SECONDS = 3600                       # بررسی سایت‌ها هر ۱ ساعت (برای رعایت سقف ۲۰ درخواست روزانه)
 
-# لیست فیدهای RSS معتبر گیمینگ و تکنولوژی (حفظ کامل منابع شما)
+# لیست فیدهای RSS معتبر گیمینگ و تکنولوژی
 SOURCE_RSS_URLS = [
     # منابع انگلیسی
     'https://feeds.feedburner.com/ign/games-all',
@@ -225,7 +227,6 @@ async def process_and_publish_batch():
             final_caption = sel['final_persian_text'].strip() + CHANNEL_SIGNATURE
             save_published_topic(sel['topic_fingerprint'])
 
-            # ارسال با فرمت HTML تا تگ <b> واقعاً عنوان را بولد کند
             if orig_item['image_url']:
                 img_path = await download_image_from_url(orig_item['image_url'], f"img_{orig_item['id']}.jpg")
                 if img_path and os.path.exists(img_path):
@@ -242,13 +243,26 @@ async def process_and_publish_batch():
     except Exception as e:
         print(f"Error publishing to channel: {e}")
 
-# ================= ۷. حلقه اصلی اجرا =================
+# ================= ۷. حلقه اصلی اجرا با محدودیت زمانی =================
 async def main_loop():
     init_db()
     print("RSS News Bot is running...")
+    tehran_tz = ZoneInfo("Asia/Tehran")
+
     while True:
-        await fetch_rss_sources()
-        await process_and_publish_batch()
+        try:
+            now_tehran = datetime.now(tehran_tz)
+            current_hour = now_tehran.hour
+
+            if 9 <= current_hour < 23:
+                await fetch_rss_sources()
+                await process_and_publish_batch()
+            else:
+                print(f"Outside active hours (Tehran time hour: {current_hour}). Bot is resting...")
+
+        except Exception as e:
+            print(f"Error in main loop: {e}")
+
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
 if __name__ == '__main__':
