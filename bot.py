@@ -1,244 +1,212 @@
-import asyncio
-import sqlite3
-import re
 import os
-import json
+import sqlite3
+import logging
+import asyncio
+from datetime import datetime
+from typing import List, Optional
+
 import aiohttp
 import feedparser
 from bs4 import BeautifulSoup
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from telegram import Bot
 from google import genai
 from google.genai import types
-from telegram import Bot
 
-# ================= ۱. تنظیمات اصلی و کلیدها =================
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
+# ----------------- تنظیمات اولیه لاگینگ -----------------
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# ----------------- تنظیمات کلیدها و کانال -----------------
+# توکن ربات تلگرام و کلید جمینای (می‌توانید مستقیم اینجا قرار دهید یا از متغیر محیطی بخوانید)
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY")
 
-TARGET_CHANNEL = '@jazebestore'                   # آیدی کانال مقصد شما
-CHANNEL_SIGNATURE = "\n\n🎮 @jazebestore"         # امضای انتهای پست
-CHECK_INTERVAL_SECONDS = 900                          # بررسی سایت‌ها هر ۱۵ دقیقه (۹۰۰ ثانیه)
+# آیدی کانال مقصد (مثلاً @YourChannelName یا آیدی عددی)
+CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME", "@YourChannelName")
 
-# لیست فیدهای RSS معتبر گیمینگ و تکنولوژی (بدون نیاز به کانال تلگرام دیگر)
-SOURCE_RSS_URLS = [
-    # منابع انگلیسی
-    'https://feeds.feedburner.com/ign/games-all',
-    'https://www.videogameschronicle.com/feed/',
-    'https://www.theverge.com/rss/index.xml',
-    'https://feeds.macrumors.com/MacRumors-All',
-    'https://9to5mac.com/feed/',
-    # منابع فارسی
-    'https://www.zoomit.ir/feed/',
-    'https://digiato.com/feed',
-    'https://www.zoomg.ir/feed/',
-    'https://vigiato.net/feed',
-    'https://gamefa.com/feed',
+# راه‌اندازی کلاینت هوش مصنوعی جمینای با نسخه جدید
+client_ai = genai.Client(api_key=GEMINI_API_KEY)
+
+# ----------------- منابع فید RSS -----------------
+RSS_FEEDS = [
+    "https://www.zoomit.ir/feed/",
+    "https://www.digiato.com/feed",
+    "https://www.zoomg.ir/feed/",
+    "https://vigiato.net/feed",
+    "https://gamefa.com/feed",
+    "https://www.ign.com/rss/articles",
+    "https://www.vgc247.com/feed"
 ]
 
-# ================= ۲. راه‌اندازی دیتابیس و کلاینت‌ها =================
-client_ai = genai.Client(api_key=GEMINI_API_KEY)
-bot = Bot(token=TELEGRAM_BOT_TOKEN)
-
-os.makedirs('temp_media', exist_ok=True)
-pending_news_buffer = []
+# ----------------- پایگاه داده SQLite -----------------
+DB_NAME = "news_bot.db"
 
 def init_db():
-    conn = sqlite3.connect('rss_news_history.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS seen_urls (url TEXT PRIMARY KEY)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS published_topics 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                  topic_summary TEXT, 
-                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS seen_urls (
+            url TEXT PRIMARY KEY,
+            published_at TIMESTAMP
+        )
+    ''')
     conn.commit()
     conn.close()
 
-def is_url_seen(url):
-    conn = sqlite3.connect('rss_news_history.db')
-    c = conn.cursor()
-    c.execute("SELECT 1 FROM seen_urls WHERE url = ?", (url,))
-    exists = c.fetchone() is not None
+def is_url_seen(url: str) -> bool:
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('SELECT 1 FROM seen_urls WHERE url = ?', (url,))
+    row = cursor.fetchone()
     conn.close()
-    return exists
+    return row is not None
 
-def mark_url_seen(url):
-    conn = sqlite3.connect('rss_news_history.db')
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO seen_urls (url) VALUES (?)", (url,))
+def mark_url_as_seen(url: str):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('INSERT OR IGNORE INTO seen_urls (url, published_at) VALUES (?, ?)', 
+                   (url, datetime.now()))
     conn.commit()
     conn.close()
 
-def get_recent_published_topics(limit=50):
-    conn = sqlite3.connect('rss_news_history.db')
-    c = conn.cursor()
-    c.execute("SELECT topic_summary FROM published_topics ORDER BY id DESC LIMIT ?", (limit,))
-    topics = [row[0] for row in c.fetchall()]
-    conn.close()
-    return topics
-
-def save_published_topic(topic_summary):
-    conn = sqlite3.connect('rss_news_history.db')
-    c = conn.cursor()
-    c.execute("INSERT INTO published_topics (topic_summary) VALUES (?)", (topic_summary,))
-    conn.commit()
-    conn.close()
-
-# ================= ۳. توابع پاکسازی و استخراج عکس =================
-def clean_raw_text(text):
-    if not text:
-        return ""
-    soup = BeautifulSoup(text, "html.parser")
-    text = soup.get_text(separator=" ")
-    text = re.sub(r'http\S+|www\S+|https\S+', '', text)
-    text = re.sub(r'@\w+', '', text)
-    return text.strip()
-
-def extract_rss_image(entry):
-    if 'media_content' in entry and len(entry.media_content) > 0:
-        return entry.media_content[0].get('url')
-    if 'media_thumbnail' in entry and len(entry.media_thumbnail) > 0:
-        return entry.media_thumbnail[0].get('url')
-    html_body = getattr(entry, 'summary', '') or ''
-    if hasattr(entry, 'content') and len(entry.content) > 0:
-        html_body += entry.content[0].value
-    soup = BeautifulSoup(html_body, 'html.parser')
-    img_tag = soup.find('img')
-    if img_tag and img_tag.get('src'):
-        return img_tag['src']
-    return None
-
-async def download_image_from_url(url, filename):
-    if not url:
-        return None
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=15) as resp:
-                if resp.status == 200:
-                    filepath = os.path.join('temp_media', filename)
-                    with open(filepath, 'wb') as f:
-                        f.write(await resp.read())
-                    return filepath
-    except Exception as e:
-        print(f"Error downloading image {url}: {e}")
-    return None
-
-# ================= ۴. ساختار خروجی هوش مصنوعی (Schema) =================
-class SelectedNewsItem(BaseModel):
-    selected_id: int
-    topic_fingerprint: str
-    final_persian_text: str
+# ----------------- ساختار خروجی Pydantic برای هوش مصنوعی -----------------
+class NewsItemOutput(BaseModel):
+    title: str = Field(description="عنوان جذاب و روان فارسی خبر")
+    summary: str = Field(description="متن خلاصه، ویراستاری‌شده و جذاب خبر به زبان فارسی روان. قانون حیاتی: اسامی خاص، برندها، نام بازی‌ها، شرکت‌ها و سخت‌افزارها نباید ترجمه شوند و باید به انگلیسی یا لاتین دقیق نوشته شوند.")
+    image_url: Optional[str] = Field(description="لینک تصویر اصلی و باکیفیت خبر اگر موجود باشد")
 
 class BatchProcessResult(BaseModel):
-    selected_news: list[SelectedNewsItem]
+    selected_news: Optional[NewsItemOutput] = Field(description="خبر منتخب و پردازش‌شده نهایی")
 
-# ================= ۵. جمع‌آوری اخبار از سایت‌ها =================
-async def fetch_rss_sources():
-    global pending_news_buffer
-    for url in SOURCE_RSS_URLS:
-        try:
-            feed = await asyncio.to_thread(feedparser.parse, url)
-            for entry in feed.entries[:3]:
-                link = getattr(entry, 'link', None)
-                if not link or is_url_seen(link):
-                    continue
-                mark_url_seen(link)
-                
-                title = getattr(entry, 'title', '')
-                summary = getattr(entry, 'summary', '')
-                cleaned_body = clean_raw_text(f"{title}\n{summary}")
-                
-                if len(cleaned_body) < 35:
-                    continue
+# ----------------- توابع کمکی -----------------
+async def fetch_feed_entries():
+    entries = []
+    async with aiohttp.ClientSession() as session:
+        for feed_url in RSS_FEEDS:
+            try:
+                async with session.get(feed_url, timeout=15) as response:
+                    if response.status == 200:
+                        content = await response.text()
+                        parsed = feedparser.parse(content)
+                        for entry in parsed.entries[:5]: # بررسی ۵ خبر آخر هر فید
+                            if hasattr(entry, 'link') and entry.link:
+                                if not is_url_seen(entry.link):
+                                    entries.append({
+                                        "title": getattr(entry, 'title', ''),
+                                        "link": entry.link,
+                                        "summary": getattr(entry, 'summary', getattr(entry, 'description', '')),
+                                        "feed": feed_url
+                                    })
+            except Exception as e:
+                logger.error(f"Error fetching feed {feed_url}: {e}")
+    return entries
 
-                img_url = extract_rss_image(entry)
-                item_id = len(pending_news_buffer) + 1
+async def process_news_with_gemini(news_list: List[dict]) -> Optional[NewsItem output if needed]:
+    if not news_list:
+        return None
 
-                pending_news_buffer.append({
-                    'id': item_id,
-                    'source': url,
-                    'text': cleaned_body,
-                    'image_url': img_url
-                })
-        except Exception as e:
-            print(f"Error checking RSS {url}: {e}")
-
-# ================= ۶. پردازش هوشمند و انتشار در کانال =================
-async def process_and_publish_batch():
-    global pending_news_buffer
-    if not pending_news_buffer:
-        return
-
-    current_batch = pending_news_buffer.copy()
-    pending_news_buffer.clear()
-
-    recent_topics = get_recent_published_topics(limit=50)
-    candidates_for_ai = [
-        {"id": item['id'], "text": item['text'], "has_media": bool(item['image_url'])}
-        for item in current_batch
-    ]
+    # آماده‌سازی متن اخبار برای تحلیل توسط جمینای
+    news_text_block = ""
+    for i, item in enumerate(news_list):
+        clean_summary = BeautifulSoup(item['summary'], "html.parser").get_text()
+        news_text_block += f"--- خبر شماره {i+1} ---\nعنوان: {item['title']}\nلینک: {item['link']}\nمتن: {clean_summary[:500]}\n\n"
 
     prompt = f"""
-    You are the Chief Editor for a Persian Gaming & Technology channel.
-    Already published topics in the last 48 hours (DO NOT repeat):
-    {json.dumps(recent_topics, ensure_ascii=False)}
+    شما یک سردبیر و ویراستار حرفه‌ای اخبار تکنولوژی و گیمینگ هستید.
+    وظیفه شما این است که از میان اخبار زیر، مهم‌ترین و کامل‌ترین خبر را انتخاب کنید (یا اگر اخبار مشابه هستند، کامل‌ترین نسخه را تجمیع و انتخاب کنید).
+    
+    قوانین حیاتی:
+    1. اسامی خاص، برندها (مثل Sony, Microsoft, Apple)، نام بازی‌ها (مثل GTA, God of War) و شرکت‌ها نباید به هیچ وجه ترجمه شوند و باید به شکل اصلی خود (انگلیسی/لاتین) نوشته شوند.
+    2. متن باید به زبان فارسی روان، جذاب و مناسب برای کانال تلگرامی ویراستاری شود.
+    3. اگر تصویر شاخص یا معتبری در متن وجود دارد لینک آن را استخراج کنید.
 
-    New incoming news candidates from websites:
-    {json.dumps(candidates_for_ai, ensure_ascii=False)}
-
-    Tasks:
-    1. Filter out duplicates against history and cluster similar news stories, picking the best and most complete one.
-    2. Translate/edit into fluent journalistic Persian (`final_persian_text`) with a bold title at the top. Length under 850 chars.
-    3. CRITICAL: Do NOT translate proper nouns, game titles, hardware models, or company names (keep PlayStation, iPhone, God of War, Steam, Sony, NVIDIA, etc. in original English form).
-    4. Provide a 1-sentence English `topic_fingerprint`.
+    اخبار ورودی:
+    {news_text_block}
     """
 
-    try:
-        response = client_ai.models.generate_content(
-            model='gemini-3.8-flash',
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=BatchProcessResult,
-                temperature=0.3
+    for attempt in range(3): # سیستم تلاش مجدد برای خطاهای موقتی 503
+        try:
+            response = client_ai.models.generate_content(
+                model='gemini-3.8-flash',  # استفاده از مدل پایدار و جدید سری 3.8
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=NewsItemOutput,
+                    temperature=0.3
+                )
             )
-        )
-        
-        result_data = json.loads(response.text)
-        selected_items = result_data.get("selected_json", []) or result_data.get("selected_news", [])
-        batch_map = {item['id']: item for item in current_batch}
+            # تبدیل خروجی به مدل Pydantic
+            import json
+            data = json.loads(response.text)
+            return data, news_list
+        except Exception as e:
+            logger.error(f"Error in Gemini processing (Attempt {attempt+1}): {e}")
+            await asyncio.sleep(3)
+    return None, None
 
-        for sel in selected_items:
-            orig_item = batch_map.get(sel['selected_id'])
-            if not orig_item:
-                continue
-
-            final_caption = sel['final_persian_text'].strip() + CHANNEL_SIGNATURE
-            save_published_topic(sel['topic_fingerprint'])
-
-            if orig_item['image_url']:
-                img_path = await download_image_from_url(orig_item['image_url'], f"img_{orig_item['id']}.jpg")
-                if img_path and os.path.exists(img_path):
-                    with open(img_path, 'rb') as photo_file:
-                        await bot.send_photo(chat_id=TARGET_CHANNEL, photo=photo_file, caption=final_caption)
-                    os.remove(img_path)
-                else:
-                    await bot.send_message(chat_id=TARGET_CHANNEL, text=final_caption)
-            else:
-                await bot.send_message(chat_id=TARGET_CHANNEL, text=final_caption)
-
-            await asyncio.sleep(5)
-
-    except Exception as e:
-        print(f"Error in Gemini processing: {e}")
-
-# ================= ۷. حلقه اصلی اجرا =================
-async def main_loop():
+# ----------------- حلقه اصلی ربات -----------------
+async def main():
     init_db()
-    print("RSS News Bot is running...")
-    while True:
-        await fetch_rss_sources()
-        await process_and_publish_batch()
-        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    logger.info("RSS News Bot is running...")
 
-if __name__ == '__main__':
-    asyncio.run(main_loop())
+    while True:
+        try:
+            logger.info("Checking RSS feeds...")
+            new_entries = await fetch_feed_entries()
+            
+            if new_entries:
+                # دسته‌بندی و پردازش اخبار جدید با جمینای
+                processed_data, original_items = await process_news_with_gemini(new_entries[:5])
+                
+                if processed_data and processed_data.get("title"):
+                    title = processed_data.get("title")
+                    summary = processed_data.get("summary")
+                    image_url = processed_data.get("image_url")
+                    
+                    # پیدا کردن لینک اصلی خبر برای ثبت در دیتابیس
+                    target_link = original_items[0]['link'] if original_items else ""
+                    
+                    formatted_message = f"🔥 **{title}**\n\n{summary}\n\n🔗 منبع: {target_link}"
+
+                    # ارسال به کانال تلگرام
+                    if image_url and image_url.startswith("http"):
+                        try:
+                            await bot.send_photo(
+                                chat_id=CHANNEL_USERNAME,
+                                photo=image_url,
+                                caption=formatted_message,
+                                parse_mode="Markdown"
+                            )
+                        except Exception:
+                            # اگر ارسال عکس خطا داد، فقط متن را بفرست
+                            await bot.send_message(
+                                chat_id=CHANNEL_USERNAME,
+                                text=formatted_message,
+                                parse_mode="Markdown"
+                            )
+                    else:
+                        await bot.send_message(
+                            chat_id=CHANNEL_USERNAME,
+                            text=formatted_message,
+                            parse_mode="Markdown"
+                        )
+
+                    # علامت‌گذاری همه لینک‌های بررسی شده به عنوان دیده‌شده
+                    for item in original_items:
+                        mark_url_as_seen(item['link'])
+                    
+                    logger.info(f"Successfully published news: {title}")
+
+        except Exception as e:
+            logger.error(f"Error in main loop: {e}")
+
+        # بررسی هر ۱۵ دقیقه یک‌بار
+        await asyncio.sleep(900)
+
+if __name__ == "__main__":
+    asyncio.run(main())
