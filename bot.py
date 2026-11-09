@@ -187,17 +187,16 @@ async def process_and_publish_batch():
 
     Tasks:
     1. Filter out duplicates against history and cluster similar news stories, picking the best and most complete one.
-    2. Translate/edit into fluent journalistic Persian (`final_persian_text`) with a bold title at the top. Length under 850 chars.
+    2. Translate/edit into fluent journalistic Persian (`final_persian_text`). Wrap ONLY the news title at the very beginning inside HTML bold tags like `<b>Title here</b>`, followed by double line breaks and the summary. Length under 850 chars.
     3. CRITICAL: Do NOT translate proper nouns, game titles, hardware models, or company names (keep PlayStation, iPhone, God of War, Steam, Sony, NVIDIA, etc. in original English form).
     4. Provide a 1-sentence English `topic_fingerprint`.
     """
 
-    # سیستم تلاش مجدد (Retry) برای رفع خطاهای موقتی ۵۰۳ یا قطعی‌های ناخواسته
     result_data = None
     for attempt in range(3):
         try:
             response = client_ai.models.generate_content(
-                model='gemini-3.8-flash',  # استفاده از مدل جدید و پایدار سری 3.8
+                model='gemini-3.8-flash',
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
@@ -226,16 +225,17 @@ async def process_and_publish_batch():
             final_caption = sel['final_persian_text'].strip() + CHANNEL_SIGNATURE
             save_published_topic(sel['topic_fingerprint'])
 
+            # ارسال با فرمت HTML تا تگ <b> واقعاً عنوان را بولد کند
             if orig_item['image_url']:
                 img_path = await download_image_from_url(orig_item['image_url'], f"img_{orig_item['id']}.jpg")
                 if img_path and os.path.exists(img_path):
                     with open(img_path, 'rb') as photo_file:
-                        await bot.send_photo(chat_id=TARGET_CHANNEL, photo=photo_file, caption=final_caption)
+                        await bot.send_photo(chat_id=TARGET_CHANNEL, photo=photo_file, caption=final_caption, parse_mode="HTML")
                     os.remove(img_path)
                 else:
-                    await bot.send_message(chat_id=TARGET_CHANNEL, text=final_caption)
+                    await bot.send_message(chat_id=TARGET_CHANNEL, text=final_caption, parse_mode="HTML")
             else:
-                await bot.send_message(chat_id=TARGET_CHANNEL, text=final_caption)
+                await bot.send_message(chat_id=TARGET_CHANNEL, text=final_caption, parse_mode="HTML")
 
             await asyncio.sleep(5)
 
