@@ -11,7 +11,6 @@ from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
-from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CallbackQueryHandler, ContextTypes
 
@@ -214,18 +213,18 @@ async def process_and_publish_batch():
             )
             result_data = json.loads(response.text)
             break
-        except (ResourceExhausted, ServiceUnavailable) as e:
-            print(f"خطای شلوغی سرور یا لیمیت (تلاش {attempt} از {max_retries}): {e}")
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str or "ResourceExhausted" in error_str or "ServiceUnavailable" in error_str or "503" in error_str:
+                print(f"خطای شلوغی سرور یا لیمیت (تلاش {attempt} از {max_retries}): {e}")
+            else:
+                print(f"خطای پردازش جمنای (تلاش {attempt}): {e}")
+
             if attempt == max_retries:
                 print("تلاش‌ها به اتمام رسید. پردازش این دسته به سیکل بعدی موکول شد.")
                 return
             await asyncio.sleep(delay)
             delay *= 2
-        except Exception as e:
-            print(f"خطای پردازش جمنای (تلاش {attempt}): {e}")
-            if attempt == max_retries:
-                return
-            await asyncio.sleep(5)
 
     if not result_data:
         return
