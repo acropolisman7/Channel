@@ -11,25 +11,25 @@ from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
-from telegram import Bot
+from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CallbackQueryHandler, ContextTypes
 
 # ================= ۱. تنظیمات اصلی و کلیدها =================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY")
 
-TARGET_CHANNEL = '@jazebestore'                      # آیدی کانال مقصد شما
-CHANNEL_SIGNATURE = "\n\n🎮 @jazebestore"          # امضای انتهای پست
-CHECK_INTERVAL_SECONDS = 3600                       # بررسی سایت‌ها هر ۱ ساعت (برای رعایت سقف ۲۰ درخواست روزانه)
+TARGET_CHANNEL = '@jazebestore'                   # آیدی کانال مقصد شما
+CHANNEL_SIGNATURE = "\n\n🎮 @jazebestore"         # امضای انتهای پست
+CHECK_INTERVAL_SECONDS = 3600                     # بررسی سایت‌ها هر ۱ ساعت
 
 # لیست فیدهای RSS معتبر گیمینگ و تکنولوژی
 SOURCE_RSS_URLS = [
-    # منابع انگلیسی
     'https://feeds.feedburner.com/ign/games-all',
     'https://www.videogameschronicle.com/feed/',
     'https://www.theverge.com/rss/index.xml',
     'https://feeds.macrumors.com/MacRumors-All',
     'https://9to5mac.com/feed/',
-    # منابع فارسی
     'https://www.zoomit.ir/feed/',
     'https://digiato.com/feed',
     'https://www.zoomg.ir/feed/',
@@ -52,6 +52,10 @@ def init_db():
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   topic_summary TEXT, 
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    # جدول ذخیره تعداد لایک‌های هر پست
+    c.execute('''CREATE TABLE IF NOT EXISTS post_likes 
+                 (post_id TEXT PRIMARY KEY, 
+                  like_count INTEGER DEFAULT 0)''')
     conn.commit()
     conn.close()
 
@@ -158,6 +162,7 @@ async def fetch_rss_sources():
                 pending_news_buffer.append({
                     'id': item_id,
                     'source': url,
+                    'link': link,  # ذخیره لینک خبر برای استفاده در دکمه شیشه‌ای
                     'text': cleaned_body,
                     'image_url': img_url
                 })
@@ -171,7 +176,6 @@ async def process_and_publish_batch():
         return
 
     current_batch = pending_news_buffer.copy()
-    pending_news_buffer.clear()
 
     recent_topics = get_recent_published_topics(limit=50)
     candidates_for_ai = [
@@ -195,7 +199,10 @@ async def process_and_publish_batch():
     """
 
     result_data = None
-    for attempt in range(3):
+    max_retries = 3
+    delay = 10
+
+    for attempt in range(1, max_retries + 1):
         try:
             response = client_ai.models.generate_content(
                 model='gemini-3.8-flash',
@@ -208,9 +215,18 @@ async def process_and_publish_batch():
             )
             result_data = json.loads(response.text)
             break
+        except (ResourceExhausted, ServiceUnavailable) as e:
+            print(f"خطای شلوغی سرور یا لیمیت (تلاش {attempt} از {max_retries}): {e}")
+            if attempt == max_retries:
+                print("تلاش‌ها به اتمام رسید. پردازش این دسته به سیکل بعدی موکول شد.")
+                return
+            await asyncio.sleep(delay)
+            delay *= 2
         except Exception as e:
-            print(f"Error in Gemini processing (Attempt {attempt+1}): {e}")
-            await asyncio.sleep(3)
+            print(f"خطای پردازش جمنای (تلاش {attempt}): {e}")
+            if attempt == max_retries:
+                return
+            await asyncio.sleep(5)
 
     if not result_data:
         return
@@ -227,43 +243,27 @@ async def process_and_publish_batch():
             final_caption = sel['final_persian_text'].strip() + CHANNEL_SIGNATURE
             save_published_topic(sel['topic_fingerprint'])
 
+            # ساخت دکمه‌های شیشه‌ای (لایک و لینک خبر)
+            news_link = orig_item.get('link', 'https://t.me/jazebestore')
+            keyboard = [
+                [
+                    InlineKeyboardButton("❤️ 0", callback_data=f"like_{orig_item['id']}"),
+                    InlineKeyboardButton("🔗 متن کامل خبر", url=news_link)
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
             if orig_item['image_url']:
                 img_path = await download_image_from_url(orig_item['image_url'], f"img_{orig_item['id']}.jpg")
                 if img_path and os.path.exists(img_path):
                     with open(img_path, 'rb') as photo_file:
-                        await bot.send_photo(chat_id=TARGET_CHANNEL, photo=photo_file, caption=final_caption, parse_mode="HTML")
+                        await bot.send_photo(
+                            chat_id=TARGET_CHANNEL, 
+                            photo=photo_file, 
+                            caption=final_caption, 
+                            parse_mode="HTML",
+                            reply_markup=reply_markup
+                        )
                     os.remove(img_path)
                 else:
-                    await bot.send_message(chat_id=TARGET_CHANNEL, text=final_caption, parse_mode="HTML")
-            else:
-                await bot.send_message(chat_id=TARGET_CHANNEL, text=final_caption, parse_mode="HTML")
-
-            await asyncio.sleep(5)
-
-    except Exception as e:
-        print(f"Error publishing to channel: {e}")
-
-# ================= ۷. حلقه اصلی اجرا با محدودیت زمانی =================
-async def main_loop():
-    init_db()
-    print("RSS News Bot is running...")
-    tehran_tz = ZoneInfo("Asia/Tehran")
-
-    while True:
-        try:
-            now_tehran = datetime.now(tehran_tz)
-            current_hour = now_tehran.hour
-
-            if 9 <= current_hour < 23:
-                await fetch_rss_sources()
-                await process_and_publish_batch()
-            else:
-                print(f"Outside active hours (Tehran time hour: {current_hour}). Bot is resting...")
-
-        except Exception as e:
-            print(f"Error in main loop: {e}")
-
-        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
-
-if __name__ == '__main__':
-    asyncio.run(main_loop())
+                    await bot.send_
