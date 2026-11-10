@@ -52,7 +52,6 @@ def init_db():
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   topic_summary TEXT, 
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    # جدول ذخیره تعداد لایک‌های هر پست
     c.execute('''CREATE TABLE IF NOT EXISTS post_likes 
                  (post_id TEXT PRIMARY KEY, 
                   like_count INTEGER DEFAULT 0)''')
@@ -162,7 +161,7 @@ async def fetch_rss_sources():
                 pending_news_buffer.append({
                     'id': item_id,
                     'source': url,
-                    'link': link,  # ذخیره لینک خبر برای استفاده در دکمه شیشه‌ای
+                    'link': link,
                     'text': cleaned_body,
                     'image_url': img_url
                 })
@@ -205,7 +204,7 @@ async def process_and_publish_batch():
     for attempt in range(1, max_retries + 1):
         try:
             response = client_ai.models.generate_content(
-                model='gemini-3.8-flash',
+                model='gemini-2.5-flash',
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
@@ -243,7 +242,6 @@ async def process_and_publish_batch():
             final_caption = sel['final_persian_text'].strip() + CHANNEL_SIGNATURE
             save_published_topic(sel['topic_fingerprint'])
 
-            # ساخت دکمه‌های شیشه‌ای (لایک و لینک خبر)
             news_link = orig_item.get('link', 'https://t.me/jazebestore')
             keyboard = [
                 [
@@ -266,4 +264,88 @@ async def process_and_publish_batch():
                         )
                     os.remove(img_path)
                 else:
-                    await bot.send_
+                    await bot.send_message(
+                        chat_id=TARGET_CHANNEL, 
+                        text=final_caption, 
+                        parse_mode="HTML",
+                        reply_markup=reply_markup
+                    )
+            else:
+                await bot.send_message(
+                    chat_id=TARGET_CHANNEL, 
+                    text=final_caption, 
+                    parse_mode="HTML",
+                    reply_markup=reply_markup
+                )
+
+            await asyncio.sleep(5)
+
+        pending_news_buffer.clear()
+
+    except Exception as e:
+        print(f"Error publishing to channel: {e}")
+
+# ================= ۷. مدیریت کلیک روی دکمه‌های شیشه‌ای (لایک) =================
+async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    if data.startswith("like_"):
+        try:
+            current_text = query.message.reply_markup.inline_keyboard[0][0].text
+            count = int(current_text.split(" ")[1]) + 1
+        except Exception:
+            count = 1
+            
+        link_button = query.message.reply_markup.inline_keyboard[0][1]
+        new_keyboard = [
+            [
+                InlineKeyboardButton(f"❤️ {count}", callback_data=data),
+                link_button
+            ]
+        ]
+        
+        try:
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(new_keyboard))
+        except Exception as e:
+            print(f"Error updating like button UI: {e}")
+
+# ================= ۸. حلقه اصلی اجرا و راه‌اندازی ربات =================
+async def background_news_loop(app_bot):
+    init_db()
+    print("RSS News Bot worker is running...")
+    tehran_tz = ZoneInfo("Asia/Tehran")
+
+    await asyncio.sleep(5)
+
+    while True:
+        try:
+            now_tehran = datetime.now(tehran_tz)
+            current_hour = now_tehran.hour
+
+            if 9 <= current_hour < 23:
+                await fetch_rss_sources()
+                await process_and_publish_batch()
+            else:
+                print(f"Outside active hours (Tehran time hour: {current_hour}). Bot is resting...")
+
+        except Exception as e:
+            print(f"Error in background news loop: {e}")
+
+        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+
+def main():
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    application.add_handler(CallbackQueryHandler(button_click_handler))
+
+    async def post_init(app: Application):
+        asyncio.create_task(background_news_loop(app.bot))
+
+    application.post_init = post_init
+
+    print("Telegram Bot application started...")
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()
