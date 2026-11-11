@@ -18,23 +18,148 @@ from telegram.ext import Application, CallbackQueryHandler, ContextTypes
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY")
 
-TARGET_CHANNEL = '@jazebestore'                   # آیدی کانال مقصد شما
-CHANNEL_SIGNATURE = "\n\n🎮 @jazebestore"         # امضای انتهای پست
-CHECK_INTERVAL_SECONDS = 3600                     # بررسی سایت‌ها هر ۱ ساعت
+TARGET_CHANNEL = '@jazebestore'                    # آیدی کانال مقصد شما
+CHANNEL_SIGNATURE = "\n\n🎮 @jazebestore"          # امضای انتهای پست
+CHECK_INTERVAL_SECONDS = 3600                      # بررسی سایت‌ها هر ۱ ساعت
+MAX_NEWS_PER_HOUR = 10                             # حداکثر تعداد خبر ارسالی در هر ساعت
 
-# لیست فیدهای RSS معتبر گیمینگ و تکنولوژی
-SOURCE_RSS_URLS = [
-    'https://feeds.feedburner.com/ign/games-all',
-    'https://www.videogameschronicle.com/feed/',
-    'https://www.theverge.com/rss/index.xml',
-    'https://feeds.macrumors.com/MacRumors-All',
-    'https://9to5mac.com/feed/',
-    'https://www.zoomit.ir/feed/',
-    'https://digiato.com/feed',
-    'https://www.zoomg.ir/feed/',
-    'https://vigiato.net/feed',
-    'https://gamefa.com/feed',
-]
+# نگاشت دسته‌بندی‌ها به هشتگ‌های ثابت فارسی
+CATEGORY_HASHTAGS = {
+    "gaming": "#گیمینگ",
+    "technology": "#تکنولوژی",
+    "hardware": "#سخت_افزار",
+    "crypto": "#کریپتو",
+    "film_tv": "#سینما_و_تلویزیون",
+    "internet_culture": "#فرهنگ_اینترنتی",
+    "music": "#موسیقی",
+    "general_news": "#اخبار_عمومی"
+}
+
+# لیست کامل فیدهای RSS تفکیک‌شده بر اساس دسته‌بندی (ترکیب فایل JSON و منابع قبلی)
+CATEGORIZED_RSS_SOURCES = {
+    "gaming": [
+        "https://www.ign.com/rss/v2/articles/feed",
+        "https://feeds.feedburner.com/ign/news",
+        "https://feeds.feedburner.com/ign/reviews",
+        "https://feeds.feedburner.com/ign/games-all",
+        "https://www.gamespot.com/feeds/mashup/",
+        "https://www.eurogamer.net/?format=rss",
+        "https://www.videogameschronicle.com/feed/",
+        "https://www.pcgamer.com/feeds.xml",
+        "https://www.polygon.com/rss/index.xml",
+        "https://kotaku.com/rss",
+        "https://www.rockpapershotgun.com/feed",
+        "https://www.gamesindustry.biz/feed",
+        "https://www.gematsu.com/feed",
+        "https://www.pushsquare.com/feeds/latest",
+        "https://www.purexbox.com/feeds/latest",
+        "https://www.nintendolife.com/feeds/latest",
+        "https://www.gamedeveloper.com/rss.xml",
+        "https://blog.playstation.com/feed/",
+        "https://news.xbox.com/en-us/feed/",
+        "https://www.zoomg.ir/feed/",
+        "https://vigiato.net/feed",
+        "https://gamefa.com/feed"
+    ],
+    "technology": [
+        "https://www.theverge.com/rss/index.xml",
+        "https://www.theverge.com/rss/tech/index.xml",
+        "https://feeds.arstechnica.com/arstechnica/index",
+        "https://www.wired.com/feed/rss",
+        "https://techcrunch.com/feed/",
+        "https://techcrunch.com/category/artificial-intelligence/feed/",
+        "https://www.engadget.com/rss.xml",
+        "https://www.cnet.com/rss/news/",
+        "https://www.techradar.com/feeds.xml",
+        "https://gizmodo.com/feed",
+        "https://mashable.com/feeds/rss/all",
+        "https://www.techmeme.com/feed.xml",
+        "https://feeds.macrumors.com/MacRumors-All",
+        "https://9to5mac.com/feed/",
+        "https://www.zoomit.ir/feed/",
+        "https://digiato.com/feed"
+    ],
+    "hardware": [
+        "https://www.tomshardware.com/feeds/all",
+        "https://www.techspot.com/backend.xml",
+        "https://www.notebookcheck.net/RSS-Feed.8156.0.html",
+        "https://www.techpowerup.com/rss/news",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCI8iQa1hv7oV_Z8D35vVuSg",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UChIs72whgZI9w6d6FhwGGHA"
+    ],
+    "crypto": [
+        "https://www.coindesk.com/arc/outboundfeeds/rss/",
+        "https://cointelegraph.com/rss",
+        "https://www.theblock.co/rss.xml",
+        "https://decrypt.co/feed",
+        "https://bitcoinmagazine.com/feed",
+        "https://www.dlnews.com/arc/outboundfeeds/rss/",
+        "https://blockworks.co/feed",
+        "https://cryptoslate.com/feed/",
+        "https://thedefiant.io/feed",
+        "https://u.today/rss",
+        "https://beincrypto.com/feed/",
+        "https://protos.com/feed"
+    ],
+    "film_tv": [
+        "https://variety.com/feed/",
+        "https://variety.com/v/film/feed/",
+        "https://variety.com/v/tv/feed/",
+        "https://variety.com/v/music/feed/",
+        "https://www.hollywoodreporter.com/feed/",
+        "https://deadline.com/feed/",
+        "https://www.indiewire.com/feed/",
+        "https://www.thewrap.com/feed/",
+        "https://collider.com/feed/",
+        "https://screenrant.com/feed/",
+        "https://www.rogerebert.com/feed",
+        "https://www.avclub.com/rss",
+        "https://consequence.net/feed/",
+        "https://www.slashfilm.com/feed/",
+        "https://www.denofgeek.com/feed/",
+        "https://bloody-disgusting.com/feed/"
+    ],
+    "internet_culture": [
+        "https://knowyourmeme.com/newsfeed.rss",
+        "https://knowyourmeme.com/editorials.rss",
+        "https://www.tmz.com/rss.xml",
+        "https://www.buzzfeed.com/index.xml",
+        "https://www.dexerto.com/feed/",
+        "https://www.complex.com/feed/",
+        "https://www.thedailybeast.com/feed",
+        "https://www.vulture.com/rss/index.xml",
+        "https://www.themarysue.com/feed/"
+    ],
+    "music": [
+        "https://www.billboard.com/feed/",
+        "https://www.rollingstone.com/feed/",
+        "https://pitchfork.com/feed/feed-news/rss",
+        "https://pitchfork.com/feed/feed-album-reviews/rss",
+        "https://www.stereogum.com/feed/",
+        "https://www.nme.com/feed",
+        "https://www.musicbusinessworldwide.com/feed/",
+        "https://www.thefader.com/rss",
+        "https://feeds.npr.org/1039/rss.xml",
+        "https://www.digitalmusicnews.com/feed/",
+        "https://musictech.com/feed/",
+        "https://ra.co/xml",
+        "https://www.spin.com/feed/"
+    ],
+    "general_news": [
+        "https://feeds.bbci.co.uk/news/rss.xml",
+        "https://feeds.bbci.co.uk/news/technology/rss.xml",
+        "https://www.theguardian.com/world/rss",
+        "https://feeds.npr.org/1001/rss.xml",
+        "https://www.aljazeera.com/xml/rss/all.xml",
+        "https://www.bloomberg.com/feeds/news.rss",
+        "https://www.bloomberg.com/feeds/markets/news.rss",
+        "https://www.ft.com/rss/home/international",
+        "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+        "https://www.economist.com/finance-and-economics/rss.xml",
+        "https://news.google.com/rss/search?q=site%3Areuters.com&hl=en-US&gl=US&ceid=US:en",
+        "https://news.google.com/rss/search?q=site%3Aapnews.com&hl=en-US&gl=US&ceid=US:en"
+    ]
+}
 
 # ================= ۲. راه‌اندازی دیتابیس و کلاینت‌ها =================
 client_ai = genai.Client(api_key=GEMINI_API_KEY)
@@ -72,7 +197,7 @@ def mark_url_seen(url):
     conn.commit()
     conn.close()
 
-def get_recent_published_topics(limit=50):
+def get_recent_published_topics(limit=60):
     conn = sqlite3.connect('rss_news_history.db')
     c = conn.cursor()
     c.execute("SELECT topic_summary FROM published_topics ORDER BY id DESC LIMIT ?", (limit,))
@@ -128,24 +253,33 @@ async def download_image_from_url(url, filename):
 
 # ================= ۴. ساختار خروجی هوش مصنوعی (Schema) =================
 class SelectedNewsItem(BaseModel):
-    selected_id: int
-    topic_fingerprint: str
-    final_persian_text: str
+    selected_id: int = Field(description="ID of the selected news candidate")
+    category_id: str = Field(description="Must be one of: gaming, technology, hardware, crypto, film_tv, internet_culture, music, general_news")
+    topic_hashtags: list[str] = Field(description="2 to 3 specific Persian hashtags starting with # using underscores instead of spaces, e.g., ['#پلی_استیشن', '#هوش_مصنوعی']")
+    topic_fingerprint: str = Field(description="1-sentence English summary for deduplication")
+    final_persian_text: str = Field(description="Formatted Persian news with HTML <b> title and summary body (without hashtags or signature)")
 
 class BatchProcessResult(BaseModel):
     selected_news: list[SelectedNewsItem]
 
-# ================= ۵. جمع‌آوری اخبار از سایت‌ها =================
-async def fetch_rss_sources():
-    global pending_news_buffer
-    for url in SOURCE_RSS_URLS:
+# ================= ۵. جمع‌آوری سریع و هم‌زمان اخبار از فیدها =================
+async def fetch_single_feed(sem, category, url):
+    """دریافت محتوای یک فید به صورت غیرهمگام با محدودکننده ترافیک"""
+    async with sem:
         try:
-            feed = await asyncio.to_thread(feedparser.parse, url)
-            for entry in feed.entries[:3]:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=12, headers={'User-Agent': 'Mozilla/5.0'}) as resp:
+                    if resp.status != 200:
+                        return []
+                    xml_data = await resp.text()
+            
+            feed = await asyncio.to_thread(feedparser.parse, xml_data)
+            extracted = []
+            # بررسی ۲ خبر آخر هر فید برای جلوگیری از انفجار حجم ورودی
+            for entry in feed.entries[:2]:
                 link = getattr(entry, 'link', None)
                 if not link or is_url_seen(link):
                     continue
-                mark_url_seen(link)
                 
                 title = getattr(entry, 'title', '')
                 summary = getattr(entry, 'summary', '')
@@ -155,45 +289,72 @@ async def fetch_rss_sources():
                     continue
 
                 img_url = extract_rss_image(entry)
-                item_id = len(pending_news_buffer) + 1
-
-                pending_news_buffer.append({
-                    'id': item_id,
+                extracted.append({
+                    'category': category,
                     'source': url,
                     'link': link,
-                    'text': cleaned_body,
+                    'text': cleaned_body[:600],  # محدود کردن طول متن خام برای بهینه‌سازی مصرف توکن
                     'image_url': img_url
                 })
-        except Exception as e:
-            print(f"Error checking RSS {url}: {e}")
+            return extracted
+        except Exception:
+            return []
 
-# ================= ۶. پردازش هوشمند و انتشار در کانال =================
+async def fetch_rss_sources():
+    global pending_news_buffer
+    sem = asyncio.Semaphore(15)  # بررسی هم‌زمان ۱۵ فید
+    tasks = []
+    
+    for category, urls in CATEGORIZED_RSS_SOURCES.items():
+        for url in urls:
+            tasks.append(fetch_single_feed(sem, category, url))
+            
+    results = await asyncio.gather(*tasks)
+    
+    for feed_items in results:
+        for item in feed_items:
+            if not is_url_seen(item['link']):
+                mark_url_seen(item['link'])
+                item['id'] = len(pending_news_buffer) + 1
+                pending_news_buffer.append(item)
+
+# ================= ۶. پردازش هوشمند (انتخاب ۱۰ خبر برتر و هشتگ‌گذاری) =================
 async def process_and_publish_batch():
     global pending_news_buffer
     if not pending_news_buffer:
         return
 
     current_batch = pending_news_buffer.copy()
-
-    recent_topics = get_recent_published_topics(limit=50)
+    recent_topics = get_recent_published_topics(limit=60)
+    
     candidates_for_ai = [
-        {"id": item['id'], "text": item['text'], "has_media": bool(item['image_url'])}
+        {
+            "id": item['id'],
+            "default_category": item['category'],
+            "text": item['text'],
+            "has_media": bool(item['image_url'])
+        }
         for item in current_batch
     ]
 
     prompt = f"""
-    You are the Chief Editor for a Persian Gaming & Technology channel.
-    Already published topics in the last 48 hours (DO NOT repeat):
+    You are the Chief Editor for a popular Persian Telegram channel covering Gaming, Tech, Hardware, Crypto, Entertainment, and World News.
+    
+    Already published topics in the last 48 hours (DO NOT repeat these topics):
     {json.dumps(recent_topics, ensure_ascii=False)}
 
-    New incoming news candidates from websites:
+    New incoming news candidates:
     {json.dumps(candidates_for_ai, ensure_ascii=False)}
 
     Tasks:
-    1. Filter out duplicates against history and cluster similar news stories, picking the best and most complete one.
-    2. Translate/edit into fluent journalistic Persian (`final_persian_text`). Wrap ONLY the news title at the very beginning inside HTML bold tags like `<b>Title here</b>`, followed by double line breaks and the summary. Length under 850 chars.
-    3. CRITICAL: Do NOT translate proper nouns, game titles, hardware models, or company names (keep PlayStation, iPhone, God of War, Steam, Sony, NVIDIA, etc. in original English form).
-    4. Provide a 1-sentence English `topic_fingerprint`.
+    1. Filter out duplicates against history and cluster similar news stories.
+    2. PRIORITY SELECTION (CRITICAL): Select AT MOST {MAX_NEWS_PER_HOUR} (maximum 10) of the highest-priority, most breaking, viral, and globally important news items from the candidates. Order them from highest priority to lowest.
+    3. Translate/edit each selected item into fluent journalistic Persian (`final_persian_text`). Wrap ONLY the news title at the very beginning inside HTML bold tags like <b>Title here</b>, followed by double line breaks and the summary. Keep length under 750 chars. Do NOT put hashtags inside `final_persian_text`.
+    4. CRITICAL: Do NOT translate proper nouns, game titles, hardware models, crypto tokens, or company names (keep PlayStation, iPhone, GTA VI, Bitcoin, NVIDIA, etc. in original English form).
+    5. CATEGORIZATION & HASHTAGS:
+       - Assign the most accurate `category_id` from: ["gaming", "technology", "hardware", "crypto", "film_tv", "internet_culture", "music", "general_news"].
+       - Generate 2 to 3 relevant Persian `topic_hashtags` for the news story (e.g., ["#هوش_مصنوعی", "#اپل"]). Always start with # and use underscores (_) instead of spaces.
+    6. Provide a 1-sentence English `topic_fingerprint`.
     """
 
     result_data = None
@@ -230,7 +391,8 @@ async def process_and_publish_batch():
         return
 
     try:
-        selected_items = result_data.get("selected_news", [])
+        # اعمال محدودیت قطعی حداکثر ۱۰ خبر در هر ساعت
+        selected_items = result_data.get("selected_news", [])[:MAX_NEWS_PER_HOUR]
         batch_map = {item['id']: item for item in current_batch}
 
         for sel in selected_items:
@@ -238,7 +400,22 @@ async def process_and_publish_batch():
             if not orig_item:
                 continue
 
-            final_caption = sel['final_persian_text'].strip() + CHANNEL_SIGNATURE
+            # ساخت بخش هشتگ‌ها (هشتگ دسته‌بندی اصلی + هشتگ‌های موضوعی هوش مصنوعی)
+            cat_id = sel.get('category_id', orig_item.get('category', 'general_news'))
+            main_cat_hashtag = CATEGORY_HASHTAGS.get(cat_id, "#اخبار")
+            
+            extra_tags = []
+            for tag in sel.get('topic_hashtags', []):
+                clean_tag = tag.strip().replace(" ", "_")
+                if not clean_tag.startswith("#"):
+                    clean_tag = "#" + clean_tag
+                if clean_tag != main_cat_hashtag:
+                    extra_tags.append(clean_tag)
+            
+            hashtags_line = " ".join([main_cat_hashtag] + extra_tags[:3])
+
+            # ترکیب متن خبر + هشتگ‌های دسته‌بندی + امضای کانال
+            final_caption = f"{sel['final_persian_text'].strip()}\n\n🏷 {hashtags_line}{CHANNEL_SIGNATURE}"
             save_published_topic(sel['topic_fingerprint'])
 
             news_link = orig_item.get('link', 'https://t.me/jazebestore')
@@ -255,24 +432,24 @@ async def process_and_publish_batch():
                 if img_path and os.path.exists(img_path):
                     with open(img_path, 'rb') as photo_file:
                         await bot.send_photo(
-                            chat_id=TARGET_CHANNEL, 
-                            photo=photo_file, 
-                            caption=final_caption, 
+                            chat_id=TARGET_CHANNEL,
+                            photo=photo_file,
+                            caption=final_caption,
                             parse_mode="HTML",
                             reply_markup=reply_markup
                         )
                     os.remove(img_path)
                 else:
                     await bot.send_message(
-                        chat_id=TARGET_CHANNEL, 
-                        text=final_caption, 
+                        chat_id=TARGET_CHANNEL,
+                        text=final_caption,
                         parse_mode="HTML",
                         reply_markup=reply_markup
                     )
             else:
                 await bot.send_message(
-                    chat_id=TARGET_CHANNEL, 
-                    text=final_caption, 
+                    chat_id=TARGET_CHANNEL,
+                    text=final_caption,
                     parse_mode="HTML",
                     reply_markup=reply_markup
                 )
@@ -324,7 +501,9 @@ async def background_news_loop(app_bot):
             current_hour = now_tehran.hour
 
             if 9 <= current_hour < 23:
+                print(f"[{now_tehran.strftime('%H:%M')}] Fetching RSS feeds concurrently...")
                 await fetch_rss_sources()
+                print(f"Collected {len(pending_news_buffer)} new candidate items. Processing top {MAX_NEWS_PER_HOUR}...")
                 await process_and_publish_batch()
             else:
                 print(f"Outside active hours (Tehran time hour: {current_hour}). Bot is resting...")
