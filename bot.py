@@ -22,8 +22,12 @@ TARGET_CHANNEL = '@jazebestore'                    # آیدی کانال مقص�
 CHANNEL_SIGNATURE = "\n\n🎮 @jazebestore"          # امضای انتهای پست
 CHECK_INTERVAL_SECONDS = 3600                      # بررسی سایت‌ها هر ۱ ساعت
 MAX_NEWS_PER_HOUR = 10                             # حداکثر تعداد خبر ارسالی در هر ساعت
+MAX_CANDIDATES_FOR_AI = 65                         # حداکثر تعداد خبر ارسالی به AI در هر ساعت (برای جلوگیری از پر شدن سهمیه توکن)
 
-# نگاشت دسته‌بندی‌ها به هشتگ‌های ثابت فارسی
+# مدل اصلی و مدل‌های پشتیبان در صورت پر شدن سهمیه روزانه (20 RPD)
+PRIMARY_MODEL = 'gemini-3.8-flash'
+FALLBACK_MODELS = ['gemini-3.8-flash']
+
 CATEGORY_HASHTAGS = {
     "gaming": "#گیمینگ",
     "technology": "#تکنولوژی",
@@ -35,7 +39,6 @@ CATEGORY_HASHTAGS = {
     "general_news": "#اخبار_عمومی"
 }
 
-# لیست کامل فیدهای RSS تفکیک‌شده بر اساس دسته‌بندی (ترکیب فایل JSON و منابع قبلی)
 CATEGORIZED_RSS_SOURCES = {
     "gaming": [
         "https://www.ign.com/rss/v2/articles/feed",
@@ -197,7 +200,7 @@ def mark_url_seen(url):
     conn.commit()
     conn.close()
 
-def get_recent_published_topics(limit=60):
+def get_recent_published_topics(limit=50):
     conn = sqlite3.connect('rss_news_history.db')
     c = conn.cursor()
     c.execute("SELECT topic_summary FROM published_topics ORDER BY id DESC LIMIT ?", (limit,))
@@ -255,7 +258,7 @@ async def download_image_from_url(url, filename):
 class SelectedNewsItem(BaseModel):
     selected_id: int = Field(description="ID of the selected news candidate")
     category_id: str = Field(description="Must be one of: gaming, technology, hardware, crypto, film_tv, internet_culture, music, general_news")
-    topic_hashtags: list[str] = Field(description="2 to 3 specific Persian hashtags starting with # using underscores instead of spaces, e.g., ['#پلی_استیشن', '#هوش_مصنوعی']")
+    topic_hashtags: list[str] = Field(description="2 to 3 specific Persian hashtags starting with # using underscores instead of spaces")
     topic_fingerprint: str = Field(description="1-sentence English summary for deduplication")
     final_persian_text: str = Field(description="Formatted Persian news with HTML <b> title and summary body (without hashtags or signature)")
 
@@ -264,7 +267,6 @@ class BatchProcessResult(BaseModel):
 
 # ================= ۵. جمع‌آوری سریع و هم‌زمان اخبار از فیدها =================
 async def fetch_single_feed(sem, category, url):
-    """دریافت محتوای یک فید به صورت غیرهمگام با محدودکننده ترافیک"""
     async with sem:
         try:
             async with aiohttp.ClientSession() as session:
@@ -275,8 +277,8 @@ async def fetch_single_feed(sem, category, url):
             
             feed = await asyncio.to_thread(feedparser.parse, xml_data)
             extracted = []
-            # بررسی ۲ خبر آخر هر فید برای جلوگیری از انفجار حجم ورودی
-            for entry in feed.entries[:2]:
+            # گرفتن فقط ۱ خبر آخر هر فید در هر ساعت برای جلوگیری از انباشت ۱۷۰+ خبر
+            for entry in feed.entries[:1]:
                 link = getattr(entry, 'link', None)
                 if not link or is_url_seen(link):
                     continue
@@ -293,7 +295,7 @@ async def fetch_single_feed(sem, category, url):
                     'category': category,
                     'source': url,
                     'link': link,
-                    'text': cleaned_body[:600],  # محدود کردن طول متن خام برای بهینه‌سازی مصرف توکن
+                    'text': cleaned_body[:450],
                     'image_url': img_url
                 })
             return extracted
@@ -302,9 +304,12 @@ async def fetch_single_feed(sem, category, url):
 
 async def fetch_rss_sources():
     global pending_news_buffer
-    sem = asyncio.Semaphore(15)  # بررسی هم‌زمان ۱۵ فید
+    # محدود کردن بافر قبلی تا در صورت بروز خطا انباشته نشود
+    if len(pending_news_buffer) > MAX_CANDIDATES_FOR_AI:
+        pending_news_buffer = pending_news_buffer[-MAX_CANDIDATES_FOR_AI:]
+
+    sem = asyncio.Semaphore(15)
     tasks = []
-    
     for category, urls in CATEGORIZED_RSS_SOURCES.items():
         for url in urls:
             tasks.append(fetch_single_feed(sem, category, url))
@@ -318,14 +323,15 @@ async def fetch_rss_sources():
                 item['id'] = len(pending_news_buffer) + 1
                 pending_news_buffer.append(item)
 
-# ================= ۶. پردازش هوشمند (انتخاب ۱۰ خبر برتر و هشتگ‌گذاری) =================
+# ================= ۶. پردازش هوشمند (با مدیریت سهمیه و مدل پشتیبان) =================
 async def process_and_publish_batch():
     global pending_news_buffer
     if not pending_news_buffer:
         return
 
-    current_batch = pending_news_buffer.copy()
-    recent_topics = get_recent_published_topics(limit=60)
+    # ارسال حداکثر ۶۵ خبر جدیدتر به مدل تا سقف توکن در دقیقه (TPM) پر نشود
+    current_batch = pending_news_buffer[-MAX_CANDIDATES_FOR_AI:]
+    recent_topics = get_recent_published_topics(limit=50)
     
     candidates_for_ai = [
         {
@@ -348,7 +354,7 @@ async def process_and_publish_batch():
 
     Tasks:
     1. Filter out duplicates against history and cluster similar news stories.
-    2. PRIORITY SELECTION (CRITICAL): Select AT MOST {MAX_NEWS_PER_HOUR} (maximum 10) of the highest-priority, most breaking, viral, and globally important news items from the candidates. Order them from highest priority to lowest.
+    2. PRIORITY SELECTION: Select AT MOST {MAX_NEWS_PER_HOUR} (maximum 10) of the highest-priority, most breaking, viral, and globally important news items from the candidates. Order them from highest priority to lowest.
     3. Translate/edit each selected item into fluent journalistic Persian (`final_persian_text`). Wrap ONLY the news title at the very beginning inside HTML bold tags like <b>Title here</b>, followed by double line breaks and the summary. Keep length under 750 chars. Do NOT put hashtags inside `final_persian_text`.
     4. CRITICAL: Do NOT translate proper nouns, game titles, hardware models, crypto tokens, or company names (keep PlayStation, iPhone, GTA VI, Bitcoin, NVIDIA, etc. in original English form).
     5. CATEGORIZATION & HASHTAGS:
@@ -358,13 +364,13 @@ async def process_and_publish_batch():
     """
 
     result_data = None
-    max_retries = 3
-    delay = 10
+    models_to_try = [PRIMARY_MODEL] + FALLBACK_MODELS
 
-    for attempt in range(1, max_retries + 1):
+    for model_name in models_to_try:
         try:
+            print(f"در حال پردازش با مدل {model_name}...")
             response = client_ai.models.generate_content(
-                model='gemini-3.8-flash',
+                model=model_name,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
@@ -373,25 +379,25 @@ async def process_and_publish_batch():
                 )
             )
             result_data = json.loads(response.text)
+            print(f"پردازش با مدل {model_name} با موفقیت انجام شد.")
             break
         except Exception as e:
             error_str = str(e)
-            if "429" in error_str or "ResourceExhausted" in error_str or "ServiceUnavailable" in error_str or "503" in error_str:
-                print(f"خطای شلوغی سرور یا لیمیت (تلاش {attempt} از {max_retries}): {e}")
+            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                print(f"سهمیه مدل {model_name} پر شده است (429). در حال تست مدل پشتیبان...")
+                await asyncio.sleep(3)
+                continue
             else:
-                print(f"خطای پردازش جمنای (تلاش {attempt}): {e}")
-
-            if attempt == max_retries:
-                print("تلاش‌ها به اتمام رسید. پردازش این دسته به سیکل بعدی موکول شد.")
-                return
-            await asyncio.sleep(delay)
-            delay *= 2
+                print(f"خطا در مدل {model_name}: {e}")
+                await asyncio.sleep(3)
+                continue
 
     if not result_data:
+        print("تمامی مدل‌ها با محدودیت مواجه شدند. این چرخه رد شد تا در ساعت بعدی دوباره تلاش شود.")
+        pending_news_buffer.clear()  # خالی کردن بافر برای جلوگیری از انباشت و مصرف بیش از حد توکن
         return
 
     try:
-        # اعمال محدودیت قطعی حداکثر ۱۰ خبر در هر ساعت
         selected_items = result_data.get("selected_news", [])[:MAX_NEWS_PER_HOUR]
         batch_map = {item['id']: item for item in current_batch}
 
@@ -400,7 +406,6 @@ async def process_and_publish_batch():
             if not orig_item:
                 continue
 
-            # ساخت بخش هشتگ‌ها (هشتگ دسته‌بندی اصلی + هشتگ‌های موضوعی هوش مصنوعی)
             cat_id = sel.get('category_id', orig_item.get('category', 'general_news'))
             main_cat_hashtag = CATEGORY_HASHTAGS.get(cat_id, "#اخبار")
             
@@ -413,8 +418,6 @@ async def process_and_publish_batch():
                     extra_tags.append(clean_tag)
             
             hashtags_line = " ".join([main_cat_hashtag] + extra_tags[:3])
-
-            # ترکیب متن خبر + هشتگ‌های دسته‌بندی + امضای کانال
             final_caption = f"{sel['final_persian_text'].strip()}\n\n🏷 {hashtags_line}{CHANNEL_SIGNATURE}"
             save_published_topic(sel['topic_fingerprint'])
 
@@ -460,6 +463,7 @@ async def process_and_publish_batch():
 
     except Exception as e:
         print(f"Error publishing to channel: {e}")
+        pending_news_buffer.clear()
 
 # ================= ۷. مدیریت کلیک روی دکمه‌های شیشه‌ای (لایک) =================
 async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -488,6 +492,10 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             print(f"Error updating like button UI: {e}")
 
 # ================= ۸. حلقه اصلی اجرا و راه‌اندازی ربات =================
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """جلوگیری از کرش کردن لاگ‌ها در زمان تداخل موقت شبکه یا تلگرام"""
+    print(f"Telegram network/update warning: {context.error}")
+
 async def background_news_loop(app_bot):
     init_db()
     print("RSS News Bot worker is running...")
@@ -516,6 +524,7 @@ async def background_news_loop(app_bot):
 def main():
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(CallbackQueryHandler(button_click_handler))
+    application.add_error_handler(error_handler)
 
     async def post_init(app: Application):
         asyncio.create_task(background_news_loop(app.bot))
@@ -523,7 +532,7 @@ def main():
     application.post_init = post_init
 
     print("Telegram Bot application started...")
-    application.run_polling()
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
