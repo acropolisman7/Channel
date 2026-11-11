@@ -3,43 +3,24 @@ import sqlite3
 import re
 import os
 import json
-import time
 import random
-import html
-import uuid
-from collections import defaultdict, deque
-from urllib.parse import urljoin
 import aiohttp
 import feedparser
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from urllib.parse import urljoin, unquote
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
 from openai import AsyncOpenAI
-from telegram import (
-    Bot,
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    InlineQueryResultArticle,
-    InputTextMessageContent,
-)
-from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    CommandHandler,
-    MessageHandler,
-    InlineQueryHandler,
-    ContextTypes,
-    filters,
-)
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CallbackQueryHandler, ContextTypes
 
-# ================= ۱. تنظیمات اصلی و خواندن کلیدها از Railway =================
+# ================= ۱. تنظیمات اصلی و کلیدهای API =================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
 
-# کلیدهای جمنای (پشتیبانی از ۳ کلید از جیمیل‌های مختلف)
+# کلیدهای API سرویس اول: Gemini
 GEMINI_API_KEYS = [
     k.strip() for k in [
         os.environ.get("GEMINI_API_KEY", ""),
@@ -48,21 +29,20 @@ GEMINI_API_KEYS = [
     ] if k.strip() and not k.startswith("YOUR_")
 ]
 
-# لیست کلیدهای Groq و OpenRouter (جدا شده با ویرگول در متغیرهای Railway)
+# کلیدهای API سرویس دوم و سوم: Groq و OpenRouter
 GROQ_API_KEYS = [k.strip() for k in os.environ.get("GROQ_API_KEYS", "").split(",") if k.strip()]
 OPENROUTER_API_KEYS = [k.strip() for k in os.environ.get("OPENROUTER_API_KEYS", "").split(",") if k.strip()]
 
 TARGET_CHANNEL = '@jazebestore'
+STORE_BASE_URL = 'https://jazebestore.com'
 CHANNEL_SIGNATURE = "\n\n🎮 @jazebestore"
-STORE_URL = "https://jazebestore.com"
 
-CHECK_INTERVAL_SECONDS = 3600   # اجرای چرخه خبری و فروشگاهی هر ۱ ساعت
-MAX_NEWS_PER_HOUR = 10          # حداکثر ۱۰ خبر برتر در هر ساعت
-MAX_CANDIDATES_FOR_AI = 65      # حداکثر ۶۵ خبر خام ارسالی به AI
-PRODUCTS_PER_HOUR = 3           # انتشار ۳ محصول رندوم موجود در هر ساعت
-POLL_INTERVAL_HOURS = 6         # حداقل فاصله زمانی بین دو نظرسنجی خودکار در کانال (ساعت)
+# تنظیمات زمانی جدید: هر نیم ساعت (۱۸۰۰ ثانیه) | ۲۴ ساعته | ۱۵ خبر در هر نیم ساعت
+CHECK_INTERVAL_SECONDS = 1800
+MAX_NEWS_PER_CYCLE = 15
+MAX_CANDIDATES_FOR_AI = 90
+PRODUCTS_PER_CYCLE = 3
 
-# مدل‌های جمنای
 GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash-lite']
 
 CATEGORY_HASHTAGS = {
@@ -75,6 +55,27 @@ CATEGORY_HASHTAGS = {
     "music": "#موسیقی",
     "general_news": "#اخبار_عمومی"
 }
+
+# کلمات کلیدی برای فیلتر کردن فقط محصولات دیجیتالی (اکانت بازی و پلی‌استیشن پلاس)
+DIGITAL_POSITIVE_KEYWORDS = [
+    "اکانت", "ظرفیت", "پلاس", "plus", "playstation plus", "ps plus",
+    "بازی", "game", "گیفت کارت", "gift card", "شتاب", "اشتراک",
+    "fc 26", "fc 25", "gta", "call of duty", "assassin", "god of war",
+    "spider-man", "elden ring", "resident evil", "black myth", "astro bot",
+    "silent hill", "ghost of", "last of us", "cyberpunk", "red dead",
+    "mortal kombat", "tekken", "forza", "halo", "minecraft", "witcher",
+    "battlefield", "death stranding", "final fantasy", "persona"
+]
+
+# کلمات کلیدی محصولات فیزیکی و سخت‌افزاری که باید کاملاً نادیده گرفته شوند
+PHYSICAL_EXCLUDE_KEYWORDS = [
+    "کنسول", "تبلت", "آیپد", "ipad", "آیفون", "iphone", "گوشی", "موبایل",
+    "لپ تاپ", "لپ‌تاپ", "macbook", "مک بوک", "مانیتور", "تلویزیون",
+    "دسته بازی", "dualsense", "دوآل سنس", "هدست", "هدفون", "ایرپاد", "airpods",
+    "پایه شارژر", "دیسک‌خور", "دیسک خور", "ریجن اروپا سری", "کارت گرافیک",
+    "ساعت هوشمند", "apple watch", "اپل واچ", "کیبورد", "ماوس", "موس", "اسپیکر",
+    "هارد", "ssd", "فلش", "پاوربانک", "شارژر", "کابل"
+]
 
 CATEGORIZED_RSS_SOURCES = {
     "gaming": [
@@ -201,62 +202,33 @@ CATEGORIZED_RSS_SOURCES = {
     ]
 }
 
-# ================= ۲. راه‌اندازی دیتابیس و حافظه موقت =================
-DB_PATH = 'rss_news_history.db'
+# ================= ۲. راه‌اندازی دیتابیس و حافظه کش =================
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
-BOT_USERNAME_CACHE = None
-
 os.makedirs('temp_media', exist_ok=True)
 pending_news_buffer = []
-
-# حافظه کوتاه‌مدت چت کاربران با دستیار هوشمند (حداکثر ۶ پیام آخر برای هر کاربر)
-user_chat_histories = defaultdict(lambda: deque(maxlen=6))
-
-async def get_bot_links() -> tuple[str, str]:
-    """دریافت خودکار یوزرنیم ربات و ساخت لینک‌های استاندارد URL برای دکمه‌های کانال"""
-    global BOT_USERNAME_CACHE
-    if not BOT_USERNAME_CACHE:
-        try:
-            me = await bot.get_me()
-            BOT_USERNAME_CACHE = me.username
-        except Exception:
-            pass
-    if BOT_USERNAME_CACHE:
-        advisor_url = f"https://t.me/{BOT_USERNAME_CACHE}?start=advisor"
-        search_url = f"https://t.me/{BOT_USERNAME_CACHE}?start=search"
-        return advisor_url, search_url
-    return STORE_URL, STORE_URL
+cached_digital_products = []  # کش محصولات دیجیتالی سایت برای تطبیق سریع با هایپ اخبار
+provider_rotation_index = 0   # چرخش هوشمند بار بین ۳ سرویس API
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect('rss_news_history.db')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS seen_urls (url TEXT PRIMARY KEY)''')
     c.execute('''CREATE TABLE IF NOT EXISTS published_topics 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   topic_summary TEXT, 
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS post_likes 
-                 (post_id TEXT PRIMARY KEY, 
-                  like_count INTEGER DEFAULT 0)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS recent_products 
-                 (product_id TEXT PRIMARY KEY, 
-                  sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS store_products_cache 
-                 (id TEXT PRIMARY KEY,
-                  name TEXT,
-                  price TEXT,
-                  link TEXT,
-                  image_url TEXT,
-                  short_desc TEXT,
+    c.execute('''CREATE TABLE IF NOT EXISTS game_hype 
+                 (game_title TEXT PRIMARY KEY, 
+                  hype_score INTEGER DEFAULT 1, 
                   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS bot_metadata 
-                 (key TEXT PRIMARY KEY, 
-                  value TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS posted_products 
+                 (product_url TEXT PRIMARY KEY, 
+                  posted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     conn.commit()
     conn.close()
 
 def is_url_seen(url):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect('rss_news_history.db')
     c = conn.cursor()
     c.execute("SELECT 1 FROM seen_urls WHERE url = ?", (url,))
     exists = c.fetchone() is not None
@@ -264,14 +236,14 @@ def is_url_seen(url):
     return exists
 
 def mark_url_seen(url):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect('rss_news_history.db')
     c = conn.cursor()
     c.execute("INSERT OR IGNORE INTO seen_urls (url) VALUES (?)", (url,))
     conn.commit()
     conn.close()
 
-def get_recent_published_topics(limit=50):
-    conn = sqlite3.connect(DB_PATH)
+def get_recent_published_topics(limit=80):
+    conn = sqlite3.connect('rss_news_history.db')
     c = conn.cursor()
     c.execute("SELECT topic_summary FROM published_topics ORDER BY id DESC LIMIT ?", (limit,))
     topics = [row[0] for row in c.fetchall()]
@@ -279,96 +251,58 @@ def get_recent_published_topics(limit=50):
     return topics
 
 def save_published_topic(topic_summary):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect('rss_news_history.db')
     c = conn.cursor()
     c.execute("INSERT INTO published_topics (topic_summary) VALUES (?)", (topic_summary,))
     conn.commit()
     conn.close()
 
-def get_recently_sent_product_ids():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("DELETE FROM recent_products WHERE sent_at <= datetime('now', '-24 hours')")
-    conn.commit()
-    c.execute("SELECT product_id FROM recent_products")
-    ids = {row[0] for row in c.fetchall()}
-    conn.close()
-    return ids
-
-def mark_product_sent(product_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO recent_products (product_id, sent_at) VALUES (?, CURRENT_TIMESTAMP)", (str(product_id),))
-    conn.commit()
-    conn.close()
-
-def save_products_to_cache(products: list[dict]):
-    if not products:
+def update_game_hype(game_title: str, score: int):
+    """ثبت و افزایش ضریب هایپ بازی‌ها بر اساس اخبار منتشرشده"""
+    if not game_title or len(game_title.strip()) < 2:
         return
-    conn = sqlite3.connect(DB_PATH)
+    clean_title = game_title.strip().lower()
+    conn = sqlite3.connect('rss_news_history.db')
     c = conn.cursor()
-    for p in products:
-        c.execute('''INSERT OR REPLACE INTO store_products_cache 
-                     (id, name, price, link, image_url, short_desc, updated_at)
-                     VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)''',
-                  (str(p['id']), p['name'], p['price'], p['link'], p.get('image_url'), p.get('short_desc', '')))
+    c.execute("""
+        INSERT INTO game_hype (game_title, hype_score, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(game_title) DO UPDATE SET
+            hype_score = hype_score + excluded.hype_score,
+            updated_at = CURRENT_TIMESTAMP
+    """, (clean_title, max(1, min(score, 10))))
+    # پاکسازی هایپ‌های قدیمی‌تر از ۷ روز برای بروز ماندن ضریب‌ها
+    c.execute("DELETE FROM game_hype WHERE updated_at < datetime('now', '-7 days')")
     conn.commit()
     conn.close()
 
-def search_cached_products(query: str = "", limit: int = 15) -> list[dict]:
-    conn = sqlite3.connect(DB_PATH)
+def get_hype_scores_map() -> dict:
+    """دریافت لیست بازی‌های دارای هایپ خبری در ۷ روز گذشته"""
+    conn = sqlite3.connect('rss_news_history.db')
     c = conn.cursor()
-    if not query.strip():
-        c.execute('''SELECT id, name, price, link, image_url, short_desc 
-                     FROM store_products_cache 
-                     ORDER BY updated_at DESC LIMIT ?''', (limit,))
-    else:
-        words = [w.strip() for w in query.strip().split() if w.strip()]
-        sql = "SELECT id, name, price, link, image_url, short_desc FROM store_products_cache WHERE "
-        conditions = []
-        params = []
-        for w in words[:4]:
-            conditions.append("(name LIKE ? OR short_desc LIKE ?)")
-            params.extend([f"%{w}%", f"%{w}%"])
-        sql += " AND ".join(conditions) + " ORDER BY updated_at DESC LIMIT ?"
-        params.append(limit)
-        c.execute(sql, tuple(params))
-    rows = c.fetchall()
+    c.execute("SELECT game_title, hype_score FROM game_hype ORDER BY hype_score DESC LIMIT 100")
+    hype_map = {row[0]: row[1] for row in c.fetchall()}
     conn.close()
-    return [
-        {
-            'id': r[0],
-            'name': r[1],
-            'price': r[2],
-            'link': r[3],
-            'image_url': r[4],
-            'short_desc': r[5]
-        }
-        for r in rows
-    ]
+    return hype_map
 
-def can_publish_poll() -> bool:
-    conn = sqlite3.connect(DB_PATH)
+def was_product_recently_posted(product_url: str, hours: int = 12) -> bool:
+    conn = sqlite3.connect('rss_news_history.db')
     c = conn.cursor()
-    c.execute("SELECT value FROM bot_metadata WHERE key = 'last_poll_ts'")
-    row = c.fetchone()
+    c.execute("DELETE FROM posted_products WHERE posted_at < datetime('now', ?)", (f'-{hours} hours',))
+    conn.commit()
+    c.execute("SELECT 1 FROM posted_products WHERE product_url = ?", (product_url,))
+    exists = c.fetchone() is not None
     conn.close()
-    if not row:
-        return True
-    try:
-        last_ts = float(row[0])
-        return (time.time() - last_ts) >= (POLL_INTERVAL_HOURS * 3600)
-    except Exception:
-        return True
+    return exists
 
-def mark_poll_published():
-    conn = sqlite3.connect(DB_PATH)
+def mark_product_posted(product_url: str):
+    conn = sqlite3.connect('rss_news_history.db')
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO bot_metadata (key, value) VALUES ('last_poll_ts', ?)", (str(time.time()),))
+    c.execute("INSERT OR REPLACE INTO posted_products (product_url, posted_at) VALUES (?, CURRENT_TIMESTAMP)", (product_url,))
     conn.commit()
     conn.close()
 
-# ================= ۳. توابع پاکسازی متن و دانلود تصویر =================
+# ================= ۳. توابع کمکی متن و تصویر =================
 def clean_raw_text(text):
     if not text:
         return ""
@@ -376,22 +310,7 @@ def clean_raw_text(text):
     text = soup.get_text(separator=" ")
     text = re.sub(r'http\S+|www\S+|https\S+', '', text)
     text = re.sub(r'@\w+', '', text)
-    return re.sub(r'\s+', ' ', text).strip()
-
-def sanitize_telegram_html(text: str) -> str:
-    """ایمن‌سازی تگ‌های HTML برای جلوگیری از خطای Parse در تلگرام"""
-    if not text:
-        return ""
-    allowed_tags = ['b', '/b', 'i', '/i', 'u', '/u', 's', '/s', 'code', '/code', 'pre', '/pre']
-    placeholders = {}
-    for idx, tag in enumerate(allowed_tags):
-        token = f"__TG_TAG_{idx}__"
-        placeholders[token] = f"<{tag}>"
-        text = re.sub(fr"<{tag}>", token, text, flags=re.IGNORECASE)
-    text = html.escape(text)
-    for token, orig_tag in placeholders.items():
-        text = text.replace(token, orig_tag)
-    return text
+    return text.strip()
 
 def extract_rss_image(entry):
     if 'media_content' in entry and len(entry.media_content) > 0:
@@ -411,12 +330,8 @@ async def download_image_from_url(url, filename):
     if not url:
         return None
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-            'Referer': STORE_URL
-        }
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(url, timeout=15, ssl=False) as resp:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'}) as resp:
                 if resp.status == 200:
                     filepath = os.path.join('temp_media', filename)
                     with open(filepath, 'wb') as f:
@@ -432,25 +347,21 @@ class SelectedNewsItem(BaseModel):
     category_id: str = Field(description="Must be one of: gaming, technology, hardware, crypto, film_tv, internet_culture, music, general_news")
     topic_hashtags: list[str] = Field(description="2 to 3 specific Persian hashtags starting with # using underscores instead of spaces")
     topic_fingerprint: str = Field(description="1-sentence English summary for deduplication")
-    final_persian_text: str = Field(description="Formatted Persian news with HTML <b> title and summary body (without hashtags or signature)")
-
-class PollData(BaseModel):
-    question: str = Field(description="Engaging Persian poll question about gaming, consoles, hardware, or the hottest news of this batch (under 250 chars)")
-    options: list[str] = Field(description="3 to 4 short, clear Persian poll options (each under 90 chars)")
+    related_game: str = Field(default="", description="Exact English name of the video game or PlayStation service if the news is about one (e.g., 'GTA VI', 'EA SPORTS FC 26', 'PlayStation Plus', 'Resident Evil 9'), otherwise empty string")
+    hype_score: int = Field(default=5, description="Hype and viral importance score from 1 to 10 based on 2022-2026 trends")
+    final_persian_text: str = Field(description="Well-edited Persian news with moderate emojis, HTML <b> bold headline, and <b> bold key phrases inside the body")
 
 class BatchProcessResult(BaseModel):
     selected_news: list[SelectedNewsItem]
-    interactive_poll: PollData = Field(description="An engaging poll based on the top gaming/tech/hardware topic in this batch")
 
-# ================= ۵. موتور پردازش چندگانه AI (اخبار + دستیار چت) =================
-async def generate_news_with_fallback(prompt: str) -> dict | None:
+# ================= ۵. موتور پردازش ۳ گانه AI (با توزیع بار هوشمند ۲۴ ساعته) =================
+async def call_gemini_provider(prompt: str) -> dict | None:
     for key_idx, api_key in enumerate(GEMINI_API_KEYS, start=1):
         temp_client = genai.Client(api_key=api_key)
         for model_name in GEMINI_MODELS:
             try:
-                print(f"تلاش پردازش خبر با جمنای (کلید #{key_idx} | مدل: {model_name})...")
-                response = await asyncio.to_thread(
-                    temp_client.models.generate_content,
+                print(f"تلاش با Gemini (کلید #{key_idx} | مدل: {model_name})...")
+                response = temp_client.models.generate_content(
                     model=model_name,
                     contents=prompt,
                     config=types.GenerateContentConfig(
@@ -459,31 +370,31 @@ async def generate_news_with_fallback(prompt: str) -> dict | None:
                         temperature=0.3
                     )
                 )
-                print(f"✅ موفقیت با جمنای (کلید #{key_idx} | مدل: {model_name})")
+                print(f"✅ موفقیت با Gemini (کلید #{key_idx} | {model_name})")
                 return json.loads(response.text)
             except Exception as e:
-                print(f"⚠️ خطا در جمنای (کلید #{key_idx} | {model_name}): {e}")
+                print(f"⚠️ خطا در Gemini (کلید #{key_idx} | {model_name}): {e}")
                 await asyncio.sleep(2)
+    return None
 
-    json_schema_instruction = """
-    Respond ONLY with a valid JSON object matching this exact schema:
+JSON_SCHEMA_INSTRUCTION = """
+Respond ONLY with a valid JSON object matching this exact schema:
+{
+  "selected_news": [
     {
-      "selected_news": [
-        {
-          "selected_id": 1,
-          "category_id": "gaming",
-          "topic_hashtags": ["#هشتگ_اول", "#هشتگ_دوم"],
-          "topic_fingerprint": "1-sentence English summary",
-          "final_persian_text": "<b>تیتر خبر</b>\\n\\nمتن خلاصه خبر به فارسی..."
-        }
-      ],
-      "interactive_poll": {
-        "question": "سوال جذاب نظرسنجی مرتبط با اخبار گیمینگ یا سخت‌افزار؟",
-        "options": ["گزینه اول", "گزینه دوم", "گزینه سوم", "گزینه چهارم"]
-      }
+      "selected_id": 1,
+      "category_id": "gaming",
+      "topic_hashtags": ["#هشتگ_اول", "#هشتگ_دوم"],
+      "topic_fingerprint": "1-sentence English summary",
+      "related_game": "GTA VI",
+      "hype_score": 9,
+      "final_persian_text": "🔥 <b>تیتر جذاب خبر</b>\\n\\n▫️ متن پاراگراف اول با <b>بولد کردن نکات کلیدی</b> و ویراستاری دقیق..."
     }
-    """
+  ]
+}
+"""
 
+async def call_groq_provider(prompt: str) -> dict | None:
     for key_idx, groq_key in enumerate(GROQ_API_KEYS, start=1):
         try:
             print(f"تلاش با Groq (کلید #{key_idx})...")
@@ -491,7 +402,7 @@ async def generate_news_with_fallback(prompt: str) -> dict | None:
             completion = await groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=[
-                    {"role": "system", "content": "You are a JSON-only API. " + json_schema_instruction},
+                    {"role": "system", "content": "You are a professional Persian Chief Editor API. " + JSON_SCHEMA_INSTRUCTION},
                     {"role": "user", "content": prompt}
                 ],
                 response_format={"type": "json_object"},
@@ -502,7 +413,9 @@ async def generate_news_with_fallback(prompt: str) -> dict | None:
         except Exception as e:
             print(f"⚠️ خطا در Groq (کلید #{key_idx}): {e}")
             await asyncio.sleep(2)
+    return None
 
+async def call_openrouter_provider(prompt: str) -> dict | None:
     for key_idx, or_key in enumerate(OPENROUTER_API_KEYS, start=1):
         try:
             print(f"تلاش با OpenRouter (کلید #{key_idx})...")
@@ -510,7 +423,7 @@ async def generate_news_with_fallback(prompt: str) -> dict | None:
             completion = await or_client.chat.completions.create(
                 model="meta-llama/llama-3.3-70b-instruct:free",
                 messages=[
-                    {"role": "system", "content": "You are a JSON-only API. " + json_schema_instruction},
+                    {"role": "system", "content": "You are a professional Persian Chief Editor API. " + JSON_SCHEMA_INSTRUCTION},
                     {"role": "user", "content": prompt}
                 ],
                 response_format={"type": "json_object"},
@@ -521,61 +434,298 @@ async def generate_news_with_fallback(prompt: str) -> dict | None:
         except Exception as e:
             print(f"⚠️ خطا در OpenRouter (کلید #{key_idx}): {e}")
             await asyncio.sleep(2)
-
     return None
 
-async def generate_chat_reply_with_fallback(system_prompt: str, user_message: str) -> str:
-    """موتور پاسخگویی سریع برای دستیار هوشمند (چت با کاربران)"""
-    full_prompt = f"{system_prompt}\n\nUser Question:\n{user_message}"
+async def generate_news_with_fallback(prompt: str) -> dict | None:
+    """چرخش هوشمند بین ۳ سرویس API برای پوشش ۲۴ ساعته بدون اتمام سهمیه"""
+    global provider_rotation_index
+    providers = [call_gemini_provider, call_groq_provider, call_openrouter_provider]
+    
+    # شروع از سرویس نوبت فعلی و تست بقیه در صورت خطا
+    ordered_providers = providers[provider_rotation_index % 3:] + providers[:provider_rotation_index % 3]
+    provider_rotation_index += 1
 
-    for api_key in GEMINI_API_KEYS:
-        temp_client = genai.Client(api_key=api_key)
-        for model_name in GEMINI_MODELS:
+    for provider_fn in ordered_providers:
+        result = await provider_fn(prompt)
+        if result and "selected_news" in result:
+            return result
+    return None
+
+# ================= ۶. استخراج فقط محصولات دیجیتالی سایت و محاسبه ضریب هایپ =================
+def is_digital_game_or_plus_product(title: str, url: str = "") -> bool:
+    """
+    بررسی دقیق برای اطمینان از اینکه محصول فقط دیجیتالی (اکانت بازی یا پلی‌استیشن پلاس) است
+    و هیچ‌گونه کالای فیزیکی/سخت‌افزاری (کنسول، تبلت، دسته و...) ارسال نمی‌شود.
+    """
+    combined = f"{title} {unquote(url)}".lower()
+
+    # ۱. رد فوری کالاهای فیزیکی و سخت‌افزاری
+    for bad_kw in PHYSICAL_EXCLUDE_KEYWORDS:
+        if bad_kw.lower() in combined:
+            return False
+
+    # ۲. تایید وجود کلمات کلیدی اکانت بازی، پلاس یا نام بازی‌های دیجیتالی
+    for good_kw in DIGITAL_POSITIVE_KEYWORDS:
+        if good_kw.lower() in combined:
+            return True
+
+    return False
+
+def calculate_product_hype_weight(product: dict, hype_map: dict) -> float:
+    """
+    محاسبه ضریب شانس ارسال محصول بر اساس هایپ و اخبار اخیر مربوط به آن بازی
+    """
+    base_weight = 1.0
+    title_lower = product['title'].lower()
+    url_lower = unquote(product['url']).lower()
+
+    # اگر محصول پلی‌استیشن پلاس است، یک ضریب پایه خوب دریافت می‌کند
+    if "پلاس" in title_lower or "plus" in title_lower:
+        base_weight += 2.5
+
+    # بررسی تطابق نام بازی‌های پرخبر (Hype) با عنوان یا لینک محصول در سایت
+    for hyped_game, score in hype_map.items():
+        if len(hyped_game) >= 3 and (hyped_game in title_lower or hyped_game in url_lower):
+            # افزایش چشمگیر ضریب ارسال لینک صفحه بازی متناسب با میزان هایپ خبرها
+            base_weight += (score * 4.0)
+
+    return base_weight
+
+def find_matching_store_product_for_news(related_game: str) -> dict | None:
+    """پیدا کردن لینک صفحه بازی در سایت زمانی که خبر داغی درباره آن بازی منتشر می‌شود"""
+    if not related_game or not cached_digital_products:
+        return None
+    game_clean = related_game.strip().lower()
+    if len(game_clean) < 3:
+        return None
+
+    for prod in cached_digital_products:
+        t_low = prod['title'].lower()
+        u_low = unquote(prod['url']).lower()
+        if game_clean in t_low or game_clean in u_low:
+            return prod
+    return None
+
+async def discover_product_urls_from_site(session: aiohttp.ClientSession) -> list[str]:
+    discovered_urls = set()
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    sitemap_candidates = [
+        f"{STORE_BASE_URL}/product-sitemap.xml",
+        f"{STORE_BASE_URL}/sitemap_index.xml",
+        f"{STORE_BASE_URL}/sitemap.xml",
+    ]
+
+    for sm_url in sitemap_candidates:
+        try:
+            async with session.get(sm_url, timeout=12, headers=headers) as resp:
+                if resp.status == 200:
+                    xml_text = await resp.text()
+                    locs = re.findall(r'<loc>(https?://[^<]+)</loc>', xml_text)
+                    sub_sitemaps = [u for u in locs if 'product' in u and u.endswith('.xml')]
+                    for sub_sm in sub_sitemaps[:3]:
+                        async with session.get(sub_sm, timeout=12, headers=headers) as sub_resp:
+                            if sub_resp.status == 200:
+                                sub_xml = await sub_resp.text()
+                                sub_locs = re.findall(r'<loc>(https?://[^<]+)</loc>', sub_xml)
+                                for u in sub_locs:
+                                    if any(p in u for p in ['/product/', '/products/', '/p/', '/shop/']):
+                                        discovered_urls.add(u)
+                    for u in locs:
+                        if not u.endswith('.xml') and any(p in u for p in ['/product/', '/products/', '/p/']):
+                            discovered_urls.add(u)
+            if discovered_urls:
+                break
+        except Exception:
+            continue
+
+    if not discovered_urls:
+        for page_url in [STORE_BASE_URL, f"{STORE_BASE_URL}/shop", f"{STORE_BASE_URL}/products"]:
             try:
-                response = await asyncio.to_thread(
-                    temp_client.models.generate_content,
-                    model=model_name,
-                    contents=full_prompt,
-                    config=types.GenerateContentConfig(temperature=0.5)
-                )
-                if response and response.text:
-                    return response.text.strip()
+                async with session.get(page_url, timeout=12, headers=headers) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+                        soup = BeautifulSoup(html, 'html.parser')
+                        for a in soup.find_all('a', href=True):
+                            full_url = urljoin(STORE_BASE_URL, a['href'])
+                            if full_url.startswith(STORE_BASE_URL) and any(p in full_url for p in ['/product/', '/products/', '/p/']):
+                                discovered_urls.add(full_url)
             except Exception:
                 continue
 
-    for groq_key in GROQ_API_KEYS:
+    # فیلتر اولیه لینک‌ها برای حذف سریع لینک‌های سخت‌افزاری واضح
+    filtered_urls = [
+        u for u in discovered_urls
+        if not any(bad in unquote(u).lower() for bad in PHYSICAL_EXCLUDE_KEYWORDS)
+    ]
+    return filtered_urls
+
+async def scrape_single_digital_product(session: aiohttp.ClientSession, url: str) -> dict | None:
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    try:
+        async with session.get(url, timeout=12, headers=headers) as resp:
+            if resp.status != 200:
+                return None
+            html = await resp.text()
+
+        soup = BeautifulSoup(html, 'html.parser')
+
+        # ۱. استخراج عنوان
+        title = None
+        og_title = soup.find('meta', property='og:title')
+        if og_title and og_title.get('content'):
+            title = og_title['content'].split('|')[0].split('- جاذبه')[0].strip()
+        if not title and soup.find('h1'):
+            title = soup.find('h1').get_text(strip=True)
+        if not title:
+            return None
+
+        # ۲. فیلتر قطعی: فقط اکانت بازی و پلی‌استیشن پلاس (رد کامل محصولات فیزیکی)
+        if not is_digital_game_or_plus_product(title, url):
+            return None
+
+        # ۳. بررسی موجود بودن محصول
+        page_text = soup.get_text(" ", strip=True)
+        avail_meta = soup.find('meta', property='og:availability') or soup.find('meta', property='product:availability')
+        if avail_meta and 'outofstock' in str(avail_meta.get('content', '')).lower():
+            return None
+        if 'ناموجود' in page_text and 'افزودن به سبد' not in page_text and 'خرید' not in page_text:
+            return None
+
+        # ۴. استخراج تصویر
+        image_url = None
+        og_img = soup.find('meta', property='og:image')
+        if og_img and og_img.get('content'):
+            image_url = og_img['content']
+
+        # ۵. استخراج قیمت
+        price_str = "مشاهده قیمت و ظرفیت‌ها در سایت"
+        price_meta = soup.find('meta', property='product:price:amount') or soup.find('meta', property='og:price:amount')
+        if price_meta and price_meta.get('content'):
+            try:
+                raw_price = int(float(str(price_meta['content']).replace(',', '').strip()))
+                if raw_price > 0:
+                    price_str = f"{raw_price:,} تومان"
+            except Exception:
+                pass
+        else:
+            price_match = re.search(r'(\d{1,3}(?:,\d{3})+)\s*تومان', page_text)
+            if price_match:
+                price_str = f"{price_match.group(1)} تومان"
+
+        return {
+            'title': title,
+            'url': url,
+            'image_url': image_url,
+            'price': price_str
+        }
+    except Exception:
+        return None
+
+async def refresh_digital_products_cache():
+    """بروزرسانی لیست محصولات دیجیتالی موجود در سایت"""
+    global cached_digital_products
+    async with aiohttp.ClientSession() as session:
+        all_urls = await discover_product_urls_from_site(session)
+        if not all_urls:
+            print("⚠️ لینکی از نقشه سایت دریافت نشد.")
+            return
+
+        random.shuffle(all_urls)
+        sampled_urls = all_urls[:45]
+        sem = asyncio.Semaphore(8)
+
+        async def fetch_with_sem(u):
+            async with sem:
+                return await scrape_single_digital_product(session, u)
+
+        results = await asyncio.gather(*(fetch_with_sem(u) for u in sampled_urls))
+        valid_digital = [r for r in results if r is not None]
+        if valid_digital:
+            cached_digital_products = valid_digital
+            print(f"✅ تعداد {len(cached_digital_products)} محصول دیجیتالی (اکانت بازی/پلاس) آماده ارسال شد.")
+
+async def publish_weighted_digital_products():
+    """
+    انتخاب و انتشار محصولات دیجیتالی با ضریب شانس بالاتر برای بازی‌های دارای هایپ خبری
+    """
+    global cached_digital_products
+    if len(cached_digital_products) < PRODUCTS_PER_CYCLE:
+        await refresh_digital_products_cache()
+
+    if not cached_digital_products:
+        print("هیچ محصول دیجیتالی موجودی برای ارسال یافت نشد.")
+        return
+
+    # حذف محصولاتی که در ۱۲ ساعت اخیر ارسال شده‌اند (در صورت وجود جایگزین کافی)
+    unposted_pool = [p for p in cached_digital_products if not was_product_recently_posted(p['url'], hours=12)]
+    candidate_pool = unposted_pool if len(unposted_pool) >= PRODUCTS_PER_CYCLE else cached_digital_products
+
+    hype_map = get_hype_scores_map()
+    
+    # انتخاب وزن‌دار بدون تکرار (Weighted Random Selection) بر اساس هایپ بازی‌ها
+    selected_products = []
+    temp_pool = candidate_pool.copy()
+
+    for _ in range(min(PRODUCTS_PER_CYCLE, len(temp_pool))):
+        weights = [calculate_product_hype_weight(p, hype_map) for p in temp_pool]
+        chosen = random.choices(temp_pool, weights=weights, k=1)[0]
+        chosen['_weight'] = round(calculate_product_hype_weight(chosen, hype_map), 1)
+        selected_products.append(chosen)
+        temp_pool.remove(chosen)
+
+    for idx, prod in enumerate(selected_products, start=1):
+        is_plus = "پلاس" in prod['title'].lower() or "plus" in prod['title'].lower()
+        badge_emoji = "💎" if is_plus else "🎮"
+        product_type_text = "اشتراک رسمی پلی‌استیشن پلاس" if is_plus else "اکانت قانونی و ظرفیتی بازی"
+
+        caption = (
+            f"{badge_emoji} <b>{prod['title']}</b>\n\n"
+            f"🔹 نوع محصول: <b>{product_type_text}</b>\n"
+            f"💰 قیمت: <b>{prod['price']}</b>\n"
+            f"✅ <b>تحویل فوری</b> به همراه گارانتی دائمی و امکان <b>خرید اقساطی</b>\n\n"
+            f"🏷 #اکانت_ظرفیتی #پلی_استیشن_پلاس #خرید_بازی"
+            f"{CHANNEL_SIGNATURE}"
+        )
+
+        keyboard = [
+            [InlineKeyboardButton("💳 خرید اقساطی و مشاهده محصول", url=prod['url'])]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
         try:
-            groq_client = AsyncOpenAI(api_key=groq_key, base_url="https://api.groq.com/openai/v1")
-            completion = await groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message}
-                ],
-                temperature=0.5
-            )
-            return completion.choices[0].message.content.strip()
-        except Exception:
-            continue
+            if prod.get('image_url'):
+                img_path = await download_image_from_url(prod['image_url'], f"prod_{idx}.jpg")
+                if img_path and os.path.exists(img_path):
+                    with open(img_path, 'rb') as photo_file:
+                        await bot.send_photo(
+                            chat_id=TARGET_CHANNEL,
+                            photo=photo_file,
+                            caption=caption,
+                            parse_mode="HTML",
+                            reply_markup=reply_markup
+                        )
+                    os.remove(img_path)
+                else:
+                    await bot.send_message(
+                        chat_id=TARGET_CHANNEL,
+                        text=caption,
+                        parse_mode="HTML",
+                        reply_markup=reply_markup
+                    )
+            else:
+                await bot.send_message(
+                    chat_id=TARGET_CHANNEL,
+                    text=caption,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup
+                )
+            mark_product_posted(prod['url'])
+            print(f"🛒 محصول دیجیتالی ارسال شد: {prod['title']} (ضریب هایپ: {prod.get('_weight', 1.0)})")
+            await asyncio.sleep(5)
+        except Exception as e:
+            print(f"Error sending digital product '{prod['title']}': {e}")
 
-    for or_key in OPENROUTER_API_KEYS:
-        try:
-            or_client = AsyncOpenAI(api_key=or_key, base_url="https://openrouter.ai/api/v1")
-            completion = await or_client.chat.completions.create(
-                model="meta-llama/llama-3.3-70b-instruct:free",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message}
-                ],
-                temperature=0.5
-            )
-            return completion.choices[0].message.content.strip()
-        except Exception:
-            continue
-
-    return "در حال حاضر ترافیک سرورهای پاسخگویی بالاست. لطفاً چند لحظه دیگر مجدداً سوال خود را بپرسید یا به سایت jazebestore.com مراجعه فرمایید. 🙏"
-
-# ================= ۶. جمع‌آوری سریع و هم‌زمان اخبار از فیدها =================
+# ================= ۷. جمع‌آوری هم‌زمان اخبار از فیدهای RSS =================
 async def fetch_single_feed(sem, category, url):
     async with sem:
         try:
@@ -587,7 +737,7 @@ async def fetch_single_feed(sem, category, url):
             
             feed = await asyncio.to_thread(feedparser.parse, xml_data)
             extracted = []
-            for entry in feed.entries[:1]:
+            for entry in feed.entries[:2]:
                 link = getattr(entry, 'link', None)
                 if not link or is_url_seen(link):
                     continue
@@ -604,7 +754,7 @@ async def fetch_single_feed(sem, category, url):
                     'category': category,
                     'source': url,
                     'link': link,
-                    'text': cleaned_body[:450],
+                    'text': cleaned_body[:500],
                     'image_url': img_url
                 })
             return extracted
@@ -616,7 +766,7 @@ async def fetch_rss_sources():
     if len(pending_news_buffer) > MAX_CANDIDATES_FOR_AI:
         pending_news_buffer = pending_news_buffer[-MAX_CANDIDATES_FOR_AI:]
 
-    sem = asyncio.Semaphore(15)
+    sem = asyncio.Semaphore(18)
     tasks = []
     for category, urls in CATEGORIZED_RSS_SOURCES.items():
         for url in urls:
@@ -631,14 +781,14 @@ async def fetch_rss_sources():
                 item['id'] = len(pending_news_buffer) + 1
                 pending_news_buffer.append(item)
 
-# ================= ۷. پردازش هوشمند اخبار + ارسال نظرسنجی خودکار =================
+# ================= ۸. پردازش هوشمند اخبار با معیارهای ۲۰۲۲-۲۰۲۶ و ویراستاری دقیق =================
 async def process_and_publish_batch():
     global pending_news_buffer
     if not pending_news_buffer:
         return
 
     current_batch = pending_news_buffer[-MAX_CANDIDATES_FOR_AI:]
-    recent_topics = get_recent_published_topics(limit=50)
+    recent_topics = get_recent_published_topics(limit=80)
     
     candidates_for_ai = [
         {
@@ -651,42 +801,57 @@ async def process_and_publish_batch():
     ]
 
     prompt = f"""
-    You are the Chief Editor for a popular Persian Telegram channel (@jazebestore) covering Gaming, Tech, Hardware, Crypto, Entertainment, and World News.
-    
+    You are the Chief Editor for '@jazebestore', a premier Persian Gaming, Tech, Hardware, Crypto, and Entertainment Telegram channel.
+    Current Year Context: 2026. You are trained on and strictly apply modern digital journalism & editorial standards from 2022 to 2026.
+
     Already published topics in the last 48 hours (DO NOT repeat these topics):
     {json.dumps(recent_topics, ensure_ascii=False)}
 
     New incoming news candidates:
     {json.dumps(candidates_for_ai, ensure_ascii=False)}
 
-    Tasks:
-    1. Filter out duplicates against history and cluster similar news stories.
-    2. PRIORITY SELECTION: Select AT MOST {MAX_NEWS_PER_HOUR} (maximum 10) of the highest-priority, most breaking, viral, and globally important news items from the candidates. Order them from highest priority to lowest.
-    3. Translate/edit each selected item into fluent journalistic Persian (`final_persian_text`). Wrap ONLY the news title at the very beginning inside HTML bold tags like <b>Title here</b>, followed by double line breaks and the summary. Keep length under 750 chars. Do NOT put hashtags inside `final_persian_text`.
-    4. CRITICAL: Do NOT translate proper nouns, game titles, hardware models, crypto tokens, or company names (keep PlayStation, iPhone, GTA VI, Bitcoin, NVIDIA, etc. in original English form).
-    5. CATEGORIZATION & HASHTAGS:
-       - Assign the most accurate `category_id` from: ["gaming", "technology", "hardware", "crypto", "film_tv", "internet_culture", "music", "general_news"].
-       - Generate 2 to 3 relevant Persian `topic_hashtags` for the news story (e.g., ["#هوش_مصنوعی", "#اپل"]). Always start with # and use underscores (_) instead of spaces.
-    6. Provide a 1-sentence English `topic_fingerprint`.
-    7. GAMIFICATION POLL (`interactive_poll`): Create 1 highly engaging Persian poll question (`question`) and 3 to 4 short options (`options`) inspired by the hottest gaming, console, or hardware topic in this batch so channel members can vote and debate.
+    STRICT EDITORIAL & VISUAL GUIDELINES (2022-2026 STANDARDS):
+    1. DEDUPLICATION & SELECTION: Filter out duplicates against history, cluster similar news, and select AT MOST {MAX_NEWS_PER_CYCLE} (maximum 15) of the highest-priority, breaking, and viral news stories. Order from highest priority to lowest.
+    2. 2022-2026 JOURNALISTIC ACCURACY:
+       - Lead with the core fact immediately (Inverted Pyramid style). Avoid clickbait or vague openings.
+       - Clearly distinguish between official confirmations ("به‌طور رسمی تایید شد") and leaks/rumors ("بر اساس گزارش اینسایدرها / شایعات").
+       - Maintain accurate 2022-2026 industry context (e.g., PS5 Pro, GTA VI, RTX 50 series, modern AI models, current PlayStation Plus tiers).
+    3. PERSIAN EDITORIAL PRECISION & BOLDING (`final_persian_text`):
+       - Write in fluent, polished, professional Persian with proper punctuation and half-spaces (نیم‌فاصله، مثل «می‌شود»، «بازی‌ها»).
+       - HEADLINE: Start with 1 relevant emoji + HTML bold headline: `🔥 <b>تیتر دقیق و جذاب خبر</b>` followed by two line breaks (`\\n\\n`).
+       - BODY BOLDING (CRITICAL): Inside the summary body, wrap **2 to 4 of the most important phrases, release dates, stats, or key facts** in HTML `<b>...</b>` tags so readers can scan the key points instantly.
+       - EMOJI BALANCE (LOW TO MODERATE): Use only 2 to 4 purposeful emojis in the entire post (1 in the headline, and 1 to 3 as clean paragraph/bullet markers like `▫️`, `🔹`, `🎮`, `⚡`). Never overuse emojis.
+       - Keep total length between 250 and 750 characters. Do NOT include hashtags inside `final_persian_text`.
+    4. PROPER NOUNS: Keep game titles, hardware models, crypto tokens, and company names in original English (e.g., PlayStation 5, GTA VI, NVIDIA, Steam, Xbox, PlayStation Plus).
+    5. GAME HYPE TRACKING:
+       - If the news relates to a specific video game or PlayStation Plus, put its exact English title in `related_game` (e.g., "GTA VI", "EA SPORTS FC 26", "PlayStation Plus", "Ghost of Yotei"). Otherwise leave `related_game` as "".
+       - Set `hype_score` (1 to 10) reflecting how hyped/viral this topic is right now.
+    6. CATEGORIZATION & HASHTAGS:
+       - Assign `category_id` from: ["gaming", "technology", "hardware", "crypto", "film_tv", "internet_culture", "music", "general_news"].
+       - Generate 2 to 3 specific Persian `topic_hashtags` starting with # and using underscores (_) instead of spaces.
     """
 
     result_data = await generate_news_with_fallback(prompt)
 
     if not result_data:
-        print("❌ تمامی کلیدها و سرویس‌های AI با خطا یا محدودیت مواجه شدند. این چرخه خبری رد شد.")
+        print("❌ تمامی سرویس‌های AI در این چرخه با خطا مواجه شدند.")
         pending_news_buffer.clear()
         return
 
     try:
-        selected_items = result_data.get("selected_news", [])[:MAX_NEWS_PER_HOUR]
+        selected_items = result_data.get("selected_news", [])[:MAX_NEWS_PER_CYCLE]
         batch_map = {item['id']: item for item in current_batch}
-        advisor_url, search_url = await get_bot_links()
 
         for sel in selected_items:
-            orig_item = batch_map.get(sel['selected_id'])
+            orig_item = batch_map.get(sel.get('selected_id'))
             if not orig_item:
                 continue
+
+            # ثبت ضریب هایپ بازی در دیتابیس برای افزایش شانس ارسال لینک محصول آن بازی
+            related_game = sel.get('related_game', '').strip()
+            hype_score = int(sel.get('hype_score', 5) or 5)
+            if related_game:
+                update_game_hype(related_game, hype_score)
 
             cat_id = sel.get('category_id', orig_item.get('category', 'general_news'))
             main_cat_hashtag = CATEGORY_HASHTAGS.get(cat_id, "#اخبار")
@@ -700,25 +865,27 @@ async def process_and_publish_batch():
                     extra_tags.append(clean_tag)
             
             hashtags_line = " ".join([main_cat_hashtag] + extra_tags[:3])
-            safe_body = sanitize_telegram_html(sel['final_persian_text'].strip())
-            final_caption = f"{safe_body}\n\n🏷 {hashtags_line}{CHANNEL_SIGNATURE}"
-            save_published_topic(sel['topic_fingerprint'])
+            final_caption = f"{sel['final_persian_text'].strip()}\n\n🏷 {hashtags_line}{CHANNEL_SIGNATURE}"
+            save_published_topic(sel.get('topic_fingerprint', orig_item['link']))
 
-            news_link = orig_item.get('link', 'https://t.me/jazebestore')
-            # در کانال تلگرام فقط از دکمه‌های url و callback_data استفاده می‌شود
+            news_link = orig_item.get('link', STORE_BASE_URL)
             keyboard = [
                 [
                     InlineKeyboardButton("❤️ 0", callback_data=f"like_{orig_item['id']}"),
-                    InlineKeyboardButton("🔗 متن کامل خبر", url=news_link)
-                ],
-                [
-                    InlineKeyboardButton("🤖 چت با هوش مصنوعی", url=advisor_url),
-                    InlineKeyboardButton("🔍 جستجوی کالا", url=search_url)
+                    InlineKeyboardButton("🔗 منبع خبر", url=news_link)
                 ]
             ]
+
+            # اگر خبر درباره یک بازی پرهایپ است که اکانت آن در سایت موجود است، دکمه مستقیم خرید همان بازی اضافه شود
+            matched_product = find_matching_store_product_for_news(related_game)
+            if matched_product:
+                keyboard.append([
+                    InlineKeyboardButton(f"🎮 خرید اکانت {related_game} از سایت", url=matched_product['url'])
+                ])
+
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            if orig_item['image_url']:
+            if orig_item.get('image_url'):
                 img_path = await download_image_from_url(orig_item['image_url'], f"img_{orig_item['id']}.jpg")
                 if img_path and os.path.exists(img_path):
                     with open(img_path, 'rb') as photo_file:
@@ -745,535 +912,40 @@ async def process_and_publish_batch():
                     reply_markup=reply_markup
                 )
 
-            await asyncio.sleep(5)
-
-        poll_info = result_data.get("interactive_poll")
-        if poll_info and can_publish_poll():
-            q_text = poll_info.get("question", "").strip()
-            raw_opts = poll_info.get("options", [])
-            clean_opts = [str(o).strip()[:95] for o in raw_opts if str(o).strip()][:4]
-            if q_text and len(clean_opts) >= 2:
-                try:
-                    await bot.send_poll(
-                        chat_id=TARGET_CHANNEL,
-                        question=f"📊 {q_text[:280]}",
-                        options=clean_opts,
-                        is_anonymous=True,
-                        allows_multiple_answers=False
-                    )
-                    mark_poll_published()
-                    print("✅ نظرسنجی تعاملی با موفقیت در کانال منتشر شد.")
-                except Exception as pe:
-                    print(f"Error sending poll: {pe}")
+            await asyncio.sleep(4)
 
         pending_news_buffer.clear()
 
     except Exception as e:
-        print(f"Error publishing news to channel: {e}")
+        print(f"Error publishing news batch to channel: {e}")
         pending_news_buffer.clear()
 
-# ================= ۸. بخش فروشگاه: همگام‌سازی کش محصولات و انتشار ساعتی =================
-async def discover_product_urls_from_site(session) -> list[str]:
-    product_urls = set()
-    product_keywords = ['/product/', '/products/', '/p/', '/item/', '/shop/']
-
-    sitemap_candidates = [
-        f"{STORE_URL}/sitemap.xml",
-        f"{STORE_URL}/sitemap_index.xml",
-        f"{STORE_URL}/product-sitemap.xml",
-        f"{STORE_URL}/sitemap-products.xml"
-    ]
-
-    sub_sitemaps = []
-    for sm_url in sitemap_candidates:
-        try:
-            async with session.get(sm_url, timeout=12, ssl=False) as resp:
-                if resp.status == 200:
-                    xml_text = await resp.text()
-                    soup = BeautifulSoup(xml_text, 'xml')
-                    for loc in soup.find_all('loc'):
-                        link = loc.get_text(strip=True)
-                        if 'product' in link.lower() and link.endswith('.xml'):
-                            sub_sitemaps.append(link)
-                        elif any(kw in link.lower() for kw in product_keywords) and not link.endswith('/shop/'):
-                            product_urls.add(link)
-        except Exception:
-            continue
-
-    for sub_url in sub_sitemaps[:3]:
-        try:
-            async with session.get(sub_url, timeout=12, ssl=False) as resp:
-                if resp.status == 200:
-                    xml_text = await resp.text()
-                    soup = BeautifulSoup(xml_text, 'xml')
-                    for loc in soup.find_all('loc'):
-                        link = loc.get_text(strip=True)
-                        if link.startswith(STORE_URL):
-                            product_urls.add(link)
-        except Exception:
-            continue
-
-    if len(product_urls) < 10:
-        for page_url in [STORE_URL, f"{STORE_URL}/shop/", f"{STORE_URL}/products/"]:
-            try:
-                async with session.get(page_url, timeout=15, ssl=False) as resp:
-                    if resp.status == 200:
-                        html_text = await resp.text()
-                        soup = BeautifulSoup(html_text, 'html.parser')
-                        for a_tag in soup.find_all('a', href=True):
-                            full_url = urljoin(STORE_URL, a_tag['href']).split('#')[0].split('?')[0]
-                            if full_url.startswith(STORE_URL) and any(kw in full_url.lower() for kw in product_keywords):
-                                if full_url.rstrip('/') not in [STORE_URL, f"{STORE_URL}/shop", f"{STORE_URL}/products"]:
-                                    product_urls.add(full_url)
-            except Exception:
-                continue
-
-    return list(product_urls)
-
-async def parse_single_product_page(session, url: str) -> dict | None:
-    try:
-        async with session.get(url, timeout=15, ssl=False) as resp:
-            if resp.status != 200:
-                return None
-            html_text = await resp.text()
-
-        soup = BeautifulSoup(html_text, 'html.parser')
-        page_text = soup.get_text(" ", strip=True)
-
-        og_avail = soup.find('meta', property='og:availability') or soup.find('meta', property='product:availability')
-        if og_avail and og_avail.get('content', '').lower() in ['out of stock', 'oos', 'outofstock']:
-            return None
-
-        out_of_stock_phrases = ['ناموجود', 'اتمام موجودی', 'موجود نیست', 'به زودی']
-        status_area = " ".join([el.get_text(" ", strip=True) for el in soup.select('.stock, .availability, .single_add_to_cart_button, button')])
-        if any(phrase in status_area for phrase in out_of_stock_phrases):
-            return None
-
-        title_tag = soup.find('meta', property='og:title')
-        h1_tag = soup.find('h1')
-        name = ""
-        if h1_tag and len(h1_tag.get_text(strip=True)) > 3:
-            name = h1_tag.get_text(strip=True)
-        elif title_tag and title_tag.get('content'):
-            name = title_tag['content'].split('|')[0].split('-')[0].strip()
-
-        if not name:
-            return None
-
-        img_tag = soup.find('meta', property='og:image')
-        img_url = img_tag['content'] if img_tag and img_tag.get('content') else None
-        if img_url and not img_url.startswith('http'):
-            img_url = urljoin(STORE_URL, img_url)
-
-        formatted_price = ""
-        price_meta = soup.find('meta', property='product:price:amount') or soup.find('meta', property='og:price:amount')
-        if price_meta and price_meta.get('content'):
-            raw_val = re.sub(r'[^\d]', '', price_meta['content'])
-            if raw_val and int(raw_val) > 1000:
-                formatted_price = f"{int(raw_val):,} تومان"
-
-        if not formatted_price:
-            price_match = re.search(r'([\d,،٬]{4,15})\s*(?:تومان|ریال)', page_text)
-            if price_match:
-                formatted_price = f"{price_match.group(1)} تومان"
-
-        desc_meta = soup.find('meta', property='og:description') or soup.find('meta', attrs={'name': 'description'})
-        short_desc = clean_raw_text(desc_meta['content']) if desc_meta and desc_meta.get('content') else ""
-        if len(short_desc) > 220:
-            short_desc = short_desc[:217] + "..."
-
-        return {
-            'id': url,
-            'name': name,
-            'price': formatted_price,
-            'link': url,
-            'image_url': img_url,
-            'short_desc': short_desc
-        }
-    except Exception:
-        return None
-
-async def sync_and_fetch_store_products(count=3) -> list[dict]:
-    """به‌روزرسانی کش محصولات فروشگاه (برای جستجوی اینلاین و AI) و انتخاب ۳ محصول موجود"""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept-Language': 'fa-IR,fa;q=0.9,en;q=0.8'
-    }
-    discovered_products = []
-
-    try:
-        async with aiohttp.ClientSession(headers=headers) as session:
-            api_url = f"{STORE_URL}/wp-json/wc/store/v1/products?per_page=80"
-            try:
-                async with session.get(api_url, timeout=15, ssl=False) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if isinstance(data, list):
-                            for p in data:
-                                if p.get('is_in_stock') is True and p.get('is_purchasable', True):
-                                    name = clean_raw_text(p.get('name', ''))
-                                    permalink = p.get('permalink', STORE_URL)
-                                    prices = p.get('prices', {})
-                                    raw_price = str(prices.get('price', ''))
-                                    minor_unit = int(prices.get('currency_minor_unit', 0))
-                                    currency_code = str(prices.get('currency_code', '')).upper()
-                                    formatted_price = ""
-                                    if raw_price.isdigit():
-                                        val = int(raw_price) // (10 ** minor_unit)
-                                        if currency_code in ['IRR', 'RIAL']:
-                                            val = val // 10
-                                        if val > 0:
-                                            formatted_price = f"{val:,} تومان"
-                                    images = p.get('images', [])
-                                    img_url = images[0].get('src') if images else None
-                                    short_desc = clean_raw_text(p.get('short_description', ''))[:220]
-                                    if name and permalink:
-                                        discovered_products.append({
-                                            'id': permalink,
-                                            'name': name,
-                                            'price': formatted_price,
-                                            'link': permalink,
-                                            'image_url': img_url,
-                                            'short_desc': short_desc
-                                        })
-            except Exception:
-                pass
-
-            if not discovered_products:
-                all_urls = await discover_product_urls_from_site(session)
-                print(f"تعداد {len(all_urls)} لینک محصول از نقشه سایت شناسایی شد.")
-                recently_sent = get_recently_sent_product_ids()
-                candidates = [u for u in all_urls if u not in recently_sent] or all_urls
-                random.shuffle(candidates)
-
-                for prod_url in candidates[:18]:
-                    prod_data = await parse_single_product_page(session, prod_url)
-                    if prod_data:
-                        discovered_products.append(prod_data)
-                    if len(discovered_products) >= max(count * 3, 10):
-                        break
-                    await asyncio.sleep(0.5)
-
-    except Exception as e:
-        print(f"Error syncing store catalog: {e}")
-
-    if discovered_products:
-        save_products_to_cache(discovered_products)
-
-    recently_sent_ids = get_recently_sent_product_ids()
-    available_pool = discovered_products if discovered_products else search_cached_products("", limit=50)
-    fresh_pool = [p for p in available_pool if str(p['id']) not in recently_sent_ids]
-    if not fresh_pool:
-        fresh_pool = available_pool
-
-    if not fresh_pool:
-        return []
-
-    return random.sample(fresh_pool, min(count, len(fresh_pool)))
-
-async def publish_random_store_products():
-    """انتشار ۳ محصول رندوم به همراه دکمه‌های خرید اقساطی، مشاوره هوشمند و جستجوی سریع"""
-    products = await sync_and_fetch_store_products(count=PRODUCTS_PER_HOUR)
-    if not products:
-        print("⚠️ محصولی برای انتشار ساعتی یافت نشد.")
-        return
-
-    advisor_url, search_url = await get_bot_links()
-    print(f"Publishing {len(products)} random in-stock products to {TARGET_CHANNEL}...")
-
-    for prod in products:
-        safe_name = html.escape(prod['name'])
-        caption_parts = [f"🔥 <b>{safe_name}</b>"]
-        
-        if prod.get('short_desc'):
-            caption_parts.append(f"\n📝 {html.escape(prod['short_desc'])}")
-            
-        if prod.get('price'):
-            caption_parts.append(f"\n💰 قیمت: <b>{html.escape(prod['price'])}</b>")
-            
-        caption_parts.append("\n✅ موجود و آماده ارسال | امکان خرید اقساطی آسان")
-        caption_parts.append("\n🏷 #فروشگاه #خرید_اقساطی")
-        final_caption = "\n".join(caption_parts) + CHANNEL_SIGNATURE
-
-        # در کانال تلگرام فقط از دکمه‌های url استفاده می‌شود تا خطا ندهد
-        keyboard = [
-            [InlineKeyboardButton("💳 خرید اقساطی این محصول", url=prod['link'])],
-            [
-                InlineKeyboardButton("🤖 مشاوره هوشمند خرید", url=advisor_url),
-                InlineKeyboardButton("🔍 جستجوی کالا", url=search_url)
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        try:
-            safe_filename = f"prod_{abs(hash(prod['id']))}.jpg"
-            if prod.get('image_url'):
-                img_path = await download_image_from_url(prod['image_url'], safe_filename)
-                if img_path and os.path.exists(img_path):
-                    with open(img_path, 'rb') as photo_file:
-                        await bot.send_photo(
-                            chat_id=TARGET_CHANNEL,
-                            photo=photo_file,
-                            caption=final_caption,
-                            parse_mode="HTML",
-                            reply_markup=reply_markup
-                        )
-                    os.remove(img_path)
-                else:
-                    await bot.send_message(
-                        chat_id=TARGET_CHANNEL,
-                        text=final_caption,
-                        parse_mode="HTML",
-                        reply_markup=reply_markup
-                    )
-            else:
-                await bot.send_message(
-                    chat_id=TARGET_CHANNEL,
-                    text=final_caption,
-                    parse_mode="HTML",
-                    reply_markup=reply_markup
-                )
-            mark_product_sent(prod['id'])
-        except Exception as e:
-            print(f"Error sending product '{prod['name']}': {e}")
-
-        await asyncio.sleep(5)
-
-# ================= ۹. قابلیت اول: دستیار هوشمند (AI Assistant) در ربات و گروه =================
-async def start_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """پیام خوش‌آمدگویی هوشمند با تشخیص ورودی از دکمه جستجو یا مشاوره کانال"""
-    if not update.message:
-        return
-
-    arg = context.args[0].lower() if context.args else ""
-
-    if arg == "search":
-        welcome_text = (
-            "🔍 <b>جستجوی آنی محصولات جاذبه استور</b>\n\n"
-            "برای جستجوی سریع بین محصولات موجود سایت و مشاهده قیمت و شرایط اقساطی، روی دکمه <b>«🔍 شروع جستجو»</b> زیر بزنید و نام محصول را تایپ کنید:"
-        )
-    else:
-        welcome_text = (
-            "سلام! به دستیار هوشمند <b>جاذبه استور (Jazebe Store)</b> خوش آمدید 🎮✨\n\n"
-            "من اینجا هستم تا به شما کمک کنم:\n"
-            "🔹 <b>مشاوره تخصصی خرید:</b> مقایسه کنسول‌ها، کارت‌های گرافیک، لپ‌تاپ و قطعات سخت‌افزاری\n"
-            "🔹 <b>استعلام محصولات و خرید اقساطی:</b> معرفی محصولات موجود در فروشگاه با لینک مستقیم خرید اقساطی\n"
-            "🔹 <b>جستجوی آنی (Inline):</b> با زدن دکمه زیر می‌توانید محصولات فروشگاه را در یک ثانیه جستجو و مشاهده کنید!\n\n"
-            "💬 <i>همین الان هر سوالی درباره بازی‌ها، سخت‌افزار یا خرید محصول دارید بنویسید تا راهنمایی‌تان کنم:</i>"
-        )
-
-    # در چت خصوصی با ربات، استفاده از switch_inline_query_current_chat کاملاً مجاز است
-    keyboard = [
-        [InlineKeyboardButton("🔍 شروع جستجوی سریع محصولات", switch_inline_query_current_chat="")],
-        [InlineKeyboardButton("📤 اشتراک‌گذاری محصول با دوستان", switch_inline_query="")],
-        [
-            InlineKeyboardButton("🌐 سایت جاذبه استور", url=STORE_URL),
-            InlineKeyboardButton("📢 کانال تلگرام", url="https://t.me/jazebestore")
-        ]
-    ]
-    await update.message.reply_text(
-        welcome_text,
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def ai_assistant_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """پاسخگویی هوشمند به سوالات کاربران در پی‌وی و گروه کامنت‌های کانال"""
-    message = update.effective_message
-    if not message or not message.text:
-        return
-
-    user_text = message.text.strip()
-    if user_text.startswith("/"):
-        return
-
-    chat_type = update.effective_chat.type
-    bot_username = context.bot.username or BOT_USERNAME_CACHE or "jazebestore_bot"
-
-    if chat_type in ["group", "supergroup"]:
-        is_reply_to_bot = (
-            message.reply_to_message
-            and message.reply_to_message.from_user
-            and message.reply_to_message.from_user.id == context.bot.id
-        )
-        is_mentioned = f"@{bot_username.lower()}" in user_text.lower()
-        if not (is_reply_to_bot or is_mentioned):
-            return
-        user_text = re.sub(fr"@{bot_username}", "", user_text, flags=re.IGNORECASE).strip()
-
-    if not user_text:
-        return
-
-    try:
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    except Exception:
-        pass
-
-    user_id = update.effective_user.id if update.effective_user else 0
-    history_list = list(user_chat_histories[user_id])
-
-    matched_products = search_cached_products(user_text, limit=5)
-    if not matched_products:
-        matched_products = search_cached_products("", limit=5)
-
-    store_context_lines = []
-    for p in matched_products:
-        price_str = p['price'] if p.get('price') else "مشاهده در سایت"
-        store_context_lines.append(f"- نام: {p['name']} | قیمت: {price_str} | لینک خرید اقساطی: {p['link']}")
-    store_catalog_text = "\n".join(store_context_lines) if store_context_lines else f"فروشگاه اینترنتی جاذبه استور: {STORE_URL}"
-
-    history_formatted = "\n".join([f"{h['role']}: {h['text']}" for h in history_list])
-
-    system_prompt = f"""
-    You are the official AI Gaming, Tech & Shopping Assistant for 'Jazebe Store' (جاذبه استور - {STORE_URL} | Telegram: @jazebestore).
-    Your role:
-    1. Answer user questions about video games, consoles (PS5, Xbox, Nintendo), PC hardware, laptops, phones, and tech specs accurately in warm, professional, and fluent Persian.
-    2. Act as a helpful sales advisor: highlight that Jazebe Store offers easy installment purchasing (خرید اقساطی آسان) on products.
-    3. If any products from the Store Catalog below match or relate to the user's request, introduce them with their exact price and link.
-    4. Formatting rules: Use ONLY simple HTML bold tags like <b>متن</b> for emphasis. Do NOT use Markdown (** or ##). Keep answers concise, structured with bullet points, and under 1200 characters.
-
-    Store Catalog Sample (In-stock items at jazebestore.com):
-    {store_catalog_text}
-
-    Recent Conversation History with this user:
-    {history_formatted}
-    """
-
-    ai_reply = await generate_chat_reply_with_fallback(system_prompt, user_text)
-    safe_reply = sanitize_telegram_html(ai_reply)
-
-    user_chat_histories[user_id].append({"role": "User", "text": user_text[:300]})
-    user_chat_histories[user_id].append({"role": "Assistant", "text": ai_reply[:400]})
-
-    advisor_url, search_url = await get_bot_links()
-    if chat_type == "private":
-        keyboard = [
-            [
-                InlineKeyboardButton("💳 مشاهده سایت و خرید اقساطی", url=STORE_URL),
-                InlineKeyboardButton("🔍 جستجوی محصول", switch_inline_query_current_chat="")
-            ]
-        ]
-    else:
-        keyboard = [
-            [
-                InlineKeyboardButton("💳 مشاهده سایت و خرید اقساطی", url=STORE_URL),
-                InlineKeyboardButton("🔍 جستجوی محصول", url=search_url)
-            ]
-        ]
-
-    await message.reply_text(
-        safe_reply,
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-# ================= ۱۰. قابلیت چهارم: جستجوی اینلاین محصولات (Inline Search) =================
-async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """جستجوی فوق سریع محصولات در هر چتی با زدن دکمه جستجو یا تایپ آیدی ربات"""
-    inline_query = update.inline_query
-    if not inline_query:
-        return
-
-    query_str = inline_query.query.strip()
-    products = search_cached_products(query_str, limit=25)
-    advisor_url, search_url = await get_bot_links()
-
-    results = []
-    for prod in products:
-        prod_name = prod['name']
-        prod_price = prod.get('price') or "استعلام قیمت در سایت"
-        prod_link = prod.get('link') or STORE_URL
-        prod_desc = prod.get('short_desc') or "موجود در جاذبه استور | امکان خرید اقساطی"
-        prod_img = prod.get('image_url')
-
-        safe_name = html.escape(prod_name)
-        safe_price = html.escape(prod_price)
-        safe_desc = html.escape(prod_desc)
-
-        message_text = (
-            f"🔥 <b>{safe_name}</b>\n\n"
-            f"📝 {safe_desc}\n\n"
-            f"💰 قیمت: <b>{safe_price}</b>\n"
-            f"✅ موجود در جاذبه استور | شرایط ویژه خرید اقساطی"
-            f"{CHANNEL_SIGNATURE}"
-        )
-
-        # استفاده از url برای سازگاری با همه چت‌ها و کانال‌ها
-        reply_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💳 خرید اقساطی و مشاهده محصول", url=prod_link)],
-            [
-                InlineKeyboardButton("🤖 مشاوره هوشمند خرید", url=advisor_url),
-                InlineKeyboardButton("🔍 جستجوی سایر محصولات", url=search_url)
-            ]
-        ])
-
-        article_kwargs = {
-            "id": str(uuid.uuid4()),
-            "title": prod_name[:60],
-            "description": f"💰 {prod_price} | 💳 خرید اقساطی",
-            "input_message_content": InputTextMessageContent(
-                message_text=message_text,
-                parse_mode="HTML"
-            ),
-            "reply_markup": reply_markup,
-        }
-        if prod_img and prod_img.startswith("http"):
-            article_kwargs["thumbnail_url"] = prod_img
-
-        results.append(InlineQueryResultArticle(**article_kwargs))
-
-    if not results:
-        fallback_text = (
-            f"🎮 <b>فروشگاه اینترنتی جاذبه استور</b>\n\n"
-            f"مرجع تخصصی کنسول‌های بازی، قطعات سخت‌افزاری و گجت‌های روز با امکان <b>خرید اقساطی آسان</b>.\n\n"
-            f"🌐 مشاهده تمامی محصولات در سایت:\n{STORE_URL}"
-            f"{CHANNEL_SIGNATURE}"
-        )
-        results.append(
-            InlineQueryResultArticle(
-                id=str(uuid.uuid4()),
-                title="🌐 مشاهده همه محصولات در سایت جاذبه استور",
-                description="کلیک کنید تا لینک فروشگاه و خرید اقساطی ارسال شود",
-                input_message_content=InputTextMessageContent(
-                    message_text=fallback_text,
-                    parse_mode="HTML"
-                ),
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("💳 ورود به سایت جاذبه استور", url=STORE_URL)],
-                    [InlineKeyboardButton("🤖 چت با هوش مصنوعی جاذبه استور", url=advisor_url)]
-                ])
-            )
-        )
-
-    try:
-        await inline_query.answer(results, cache_time=60, is_personal=True)
-    except Exception as e:
-        print(f"Inline query answer error: {e}")
-
-# ================= ۱۱. مدیریت کلیک روی دکمه‌های شیشه‌ای (لایک پست‌ها با حفظ سایر دکمه‌ها) =================
+# ================= ۹. مدیریت دکمه لایک پست‌ها (حفظ دکمه لینک بازی در صورت وجود) =================
 async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if not query:
-        return
     await query.answer()
     
-    data = query.data or ""
-    if data.startswith("like_"):
+    data = query.data
+    if data and data.startswith("like_"):
         try:
-            current_text = query.message.reply_markup.inline_keyboard[0][0].text
+            existing_rows = list(query.message.reply_markup.inline_keyboard)
+            first_row = list(existing_rows[0])
+            current_text = first_row[0].text
             count = int(current_text.split(" ")[1]) + 1
         except Exception:
             count = 1
-            
+            existing_rows = list(query.message.reply_markup.inline_keyboard)
+            first_row = list(existing_rows[0])
+
+        first_row[0] = InlineKeyboardButton(f"❤️ {count}", callback_data=data)
+        existing_rows[0] = first_row
+        
         try:
-            existing_rows = [list(row) for row in query.message.reply_markup.inline_keyboard]
-            existing_rows[0][0] = InlineKeyboardButton(f"❤️ {count}", callback_data=data)
             await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(existing_rows))
         except Exception as e:
             print(f"Error updating like button UI: {e}")
 
-# ================= ۱۲. حلقه اصلی اجرا و راه‌اندازی ایمن ربات =================
+# ================= ۱۰. حلقه اصلی ۲۴ ساعته (هر نیم ساعت) =================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     err_msg = str(context.error)
     if "Conflict" in err_msg:
@@ -1283,50 +955,39 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def background_news_loop(app_bot):
     init_db()
-    await get_bot_links()
-    print("RSS News, Store Sync, Polls & AI Assistant worker is running...")
+    print("🚀 24/7 RSS News & Digital Store Bot is running (Every 30 mins | 15 News/cycle)...")
     tehran_tz = ZoneInfo("Asia/Tehran")
 
-    await asyncio.sleep(10)
+    # تاخیر ۱۵ ثانیه‌ای برای بسته شدن کامل کانتینر قبلی در Railway
+    await asyncio.sleep(15)
 
-    try:
-        print("Initial store catalog sync for Inline Search & AI Assistant...")
-        await sync_and_fetch_store_products(count=1)
-    except Exception as e:
-        print(f"Initial catalog sync warning: {e}")
-
+    cycle_counter = 0
     while True:
         try:
             now_tehran = datetime.now(tehran_tz)
-            current_hour = now_tehran.hour
+            cycle_counter += 1
+            print(f"\n--- [Cycle #{cycle_counter} | {now_tehran.strftime('%Y-%m-%d %H:%M')} Tehran] ---")
 
-            if 9 <= current_hour < 23:
-                print(f"[{now_tehran.strftime('%H:%M')}] Fetching RSS feeds concurrently...")
-                await fetch_rss_sources()
-                print(f"Collected {len(pending_news_buffer)} new candidate items. Processing top {MAX_NEWS_PER_HOUR}...")
-                await process_and_publish_batch()
-                
-                await publish_random_store_products()
-            else:
-                print(f"Outside active hours (Tehran time hour: {current_hour}). Bot is resting...")
+            # بروزرسانی کش محصولات دیجیتالی سایت در ابتدای کار و هر ۴ چرخه یک‌بار (هر ۲ ساعت)
+            if cycle_counter == 1 or cycle_counter % 4 == 0:
+                await refresh_digital_products_cache()
+
+            # ۱. جمع‌آوری سریع فیدها و انتشار حداکثر ۱۵ خبر برتر
+            await fetch_rss_sources()
+            print(f"Collected {len(pending_news_buffer)} new items. Selecting & editing top {MAX_NEWS_PER_CYCLE}...")
+            await process_and_publish_batch()
+
+            # ۲. ارسال محصولات دیجیتالی (اکانت بازی و پلاس) با ضریب شانس مبتنی بر هایپ اخبار
+            await publish_weighted_digital_products()
 
         except Exception as e:
-            print(f"Error in background loop: {e}")
+            print(f"Error in 24/7 background loop: {e}")
 
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
 def main():
-    print("Waiting 20 seconds for old container to shut down cleanly...")
-    time.sleep(20)
-
-    init_db()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start_command_handler))
-    application.add_handler(CommandHandler("help", start_command_handler))
-    application.add_handler(InlineQueryHandler(inline_query_handler))
     application.add_handler(CallbackQueryHandler(button_click_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ai_assistant_message_handler))
     application.add_error_handler(error_handler)
 
     async def post_init(app: Application):
@@ -1335,7 +996,7 @@ def main():
 
     application.post_init = post_init
 
-    print("Telegram Bot application started successfully!")
+    print("Telegram Bot application started (24/7 Mode)...")
     application.run_polling(
         drop_pending_updates=True,
         allowed_updates=Update.ALL_TYPES,
