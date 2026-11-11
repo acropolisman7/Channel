@@ -1,6 +1,7 @@
 python-telegram-bot
 google-genai
+aiohttp
 feedparser
 beautifulsoup4
-aiohttp
 pydantic
+openai
