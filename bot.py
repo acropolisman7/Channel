@@ -4,6 +4,7 @@ import re
 import os
 import json
 import random
+from urllib.parse import urljoin, urlparse
 import aiohttp
 import feedparser
 from datetime import datetime
@@ -38,7 +39,7 @@ STORE_URL = "https://jazebestore.com"
 
 CHECK_INTERVAL_SECONDS = 3600   # اجرای چرخه هر ۱ ساعت
 MAX_NEWS_PER_HOUR = 10          # حداکثر ۱۰ خبر برتر در هر ساعت
-MAX_CANDIDATES_FOR_AI = 65      # حداکثر ۶۵ خبر خام ارسالی به AI برای مدیریت توکن
+MAX_CANDIDATES_FOR_AI = 65      # حداکثر ۶۵ خبر خام ارسالی به AI
 PRODUCTS_PER_HOUR = 3           # انتشار ۳ محصول رندوم موجود در هر ساعت
 
 # مدل‌های جمنای
@@ -233,7 +234,6 @@ def save_published_topic(topic_summary):
     conn.close()
 
 def get_recently_sent_product_ids():
-    """دریافت شناسه محصولاتی که در ۲۴ ساعت گذشته ارسال شده‌اند تا تکراری نباشند"""
     conn = sqlite3.connect('rss_news_history.db')
     c = conn.cursor()
     c.execute("DELETE FROM recent_products WHERE sent_at <= datetime('now', '-24 hours')")
@@ -278,9 +278,12 @@ async def download_image_from_url(url, filename):
     if not url:
         return None
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': STORE_URL
+        }
         async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(url, timeout=15) as resp:
+            async with session.get(url, timeout=15, ssl=False) as resp:
                 if resp.status == 200:
                     filepath = os.path.join('temp_media', filename)
                     with open(filepath, 'wb') as f:
@@ -551,93 +554,180 @@ async def process_and_publish_batch():
         print(f"Error publishing news to channel: {e}")
         pending_news_buffer.clear()
 
-# ================= ۸. بخش فروشگاه: دریافت و انتشار ۳ محصول موجود سایت =================
-async def fetch_random_in_stock_products(count=3):
-    """دریافت محصولات فعال و دارای موجودی از jazebestore.com بدون تکرار ۲۴ ساعته"""
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-    in_stock_products = []
-    recently_sent_ids = get_recently_sent_product_ids()
+# ================= ۸. بخش فروشگاه: دریافت هوشمند محصولات از Sitemap و HTML =================
+async def discover_product_urls_from_site(session) -> list[str]:
+    """یافتن لینک صفحات محصولات از طریق Sitemap و صفحات عمومی سایت"""
+    product_urls = set()
+    product_keywords = ['/product/', '/products/', '/p/', '/item/', '/shop/']
 
-    try:
-        async with aiohttp.ClientSession(headers=headers) as session:
-            # روش اول: API عمومی محصولات ووکامرس
-            api_url = f"{STORE_URL}/wp-json/wc/store/v1/products?per_page=100"
-            async with session.get(api_url, timeout=20) as resp:
+    # ۱. بررسی نقشه سایت (Sitemap)
+    sitemap_candidates = [
+        f"{STORE_URL}/sitemap.xml",
+        f"{STORE_URL}/sitemap_index.xml",
+        f"{STORE_URL}/product-sitemap.xml",
+        f"{STORE_URL}/sitemap-products.xml"
+    ]
+
+    sub_sitemaps = []
+    for sm_url in sitemap_candidates:
+        try:
+            async with session.get(sm_url, timeout=12, ssl=False) as resp:
                 if resp.status == 200:
-                    products_data = await resp.json()
-                    for p in products_data:
-                        prod_id = str(p.get('id', ''))
-                        if prod_id in recently_sent_ids:
-                            continue
+                    xml_text = await resp.text()
+                    soup = BeautifulSoup(xml_text, 'xml')
+                    for loc in soup.find_all('loc'):
+                        link = loc.get_text(strip=True)
+                        if 'product' in link.lower() and link.endswith('.xml'):
+                            sub_sitemaps.append(link)
+                        elif any(kw in link.lower() for kw in product_keywords) and not link.endswith('/shop/'):
+                            product_urls.add(link)
+        except Exception:
+            continue
 
-                        if p.get('is_in_stock') is True and p.get('is_purchasable', True):
-                            name = clean_raw_text(p.get('name', ''))
-                            permalink = p.get('permalink', STORE_URL)
-                            
-                            prices = p.get('prices', {})
-                            raw_price = prices.get('price', '')
-                            currency_minor_unit = prices.get('currency_minor_unit', 0)
-                            formatted_price = ""
-                            if raw_price and raw_price.isdigit():
-                                val = int(raw_price) // (10 ** currency_minor_unit)
-                                if val > 0:
-                                    formatted_price = f"{val:,} تومان"
+    # بررسی زیرمجموعه‌های سایت‌مپ (اگر وجود داشت)
+    for sub_url in sub_sitemaps[:3]:
+        try:
+            async with session.get(sub_url, timeout=12, ssl=False) as resp:
+                if resp.status == 200:
+                    xml_text = await resp.text()
+                    soup = BeautifulSoup(xml_text, 'xml')
+                    for loc in soup.find_all('loc'):
+                        link = loc.get_text(strip=True)
+                        if link.startswith(STORE_URL):
+                            product_urls.add(link)
+        except Exception:
+            continue
 
-                            images = p.get('images', [])
-                            img_url = images[0].get('src') if images else None
-
-                            short_desc = clean_raw_text(p.get('short_description', ''))
-                            if len(short_desc) > 250:
-                                short_desc = short_desc[:247] + "..."
-
-                            in_stock_products.append({
-                                'id': prod_id or str(random.randint(1000, 9999)),
-                                'name': name,
-                                'price': formatted_price,
-                                'link': permalink,
-                                'image_url': img_url,
-                                'short_desc': short_desc
-                            })
-
-            # روش دوم (جایگزین): اسکرپ صفحه فروشگاه در صورت غیرفعال بودن API
-            if not in_stock_products:
-                shop_url = f"{STORE_URL}/shop/"
-                async with session.get(shop_url, timeout=20) as resp:
+    # ۲. اسکرپ لینک‌های صفحه اصلی و صفحه فروشگاه در صورت خالی بودن سایت‌مپ
+    if len(product_urls) < 10:
+        for page_url in [STORE_URL, f"{STORE_URL}/shop/", f"{STORE_URL}/products/"]:
+            try:
+                async with session.get(page_url, timeout=15, ssl=False) as resp:
                     if resp.status == 200:
                         html = await resp.text()
                         soup = BeautifulSoup(html, 'html.parser')
-                        for item in soup.select('li.product.instock'):
-                            title_el = item.select_one('.woocommerce-loop-product__title, h2, h3')
-                            link_el = item.select_one('a[href]')
-                            img_el = item.select_one('img')
-                            price_el = item.select_one('.price')
+                        for a_tag in soup.find_all('a', href=True):
+                            full_url = urljoin(STORE_URL, a_tag['href']).split('#')[0].split('?')[0]
+                            if full_url.startswith(STORE_URL) and any(kw in full_url.lower() for kw in product_keywords):
+                                if full_url.rstrip('/') not in [STORE_URL, f"{STORE_URL}/shop", f"{STORE_URL}/products"]:
+                                    product_urls.add(full_url)
+            except Exception:
+                continue
 
-                            if title_el and link_el:
-                                p_link = link_el['href']
-                                if p_link in recently_sent_ids:
-                                    continue
-                                in_stock_products.append({
-                                    'id': p_link,
-                                    'name': title_el.get_text(strip=True),
-                                    'price': clean_raw_text(price_el.get_text()) if price_el else "",
-                                    'link': p_link,
-                                    'image_url': img_el.get('data-src') or img_el.get('src') if img_el else None,
-                                    'short_desc': ""
-                                })
+    return list(product_urls)
+
+async def parse_single_product_page(session, url: str) -> dict | None:
+    """استخراج اطلاعات محصول و بررسی موجودی از متادیتا و متن صفحه"""
+    try:
+        async with session.get(url, timeout=15, ssl=False) as resp:
+            if resp.status != 200:
+                return None
+            html = await resp.text()
+
+        soup = BeautifulSoup(html, 'html.parser')
+        page_text = soup.get_text(" ", strip=True)
+
+        # بررسی ناموجود بودن کالا از طریق متاتگ‌ها و عبارات فارسی
+        og_avail = soup.find('meta', property='og:availability') or soup.find('meta', property='product:availability')
+        if og_avail and og_avail.get('content', '').lower() in ['out of stock', 'oos', 'outofstock']:
+            return None
+
+        out_of_stock_phrases = ['ناموجود', 'اتمام موجودی', 'موجود نیست', 'به زودی']
+        # بررسی در محدوده دکمه‌های خرید یا وضعیت محصول
+        status_area = " ".join([el.get_text(" ", strip=True) for el in soup.select('.stock, .availability, .single_add_to_cart_button, button')])
+        if any(phrase in status_area for phrase in out_of_stock_phrases):
+            return None
+
+        # استخراج عنوان محصول
+        title_tag = soup.find('meta', property='og:title')
+        h1_tag = soup.find('h1')
+        name = ""
+        if h1_tag and len(h1_tag.get_text(strip=True)) > 3:
+            name = h1_tag.get_text(strip=True)
+        elif title_tag and title_tag.get('content'):
+            name = title_tag['content'].split('|')[0].split('-')[0].strip()
+
+        if not name:
+            return None
+
+        # استخراج تصویر محصول
+        img_tag = soup.find('meta', property='og:image')
+        img_url = img_tag['content'] if img_tag and img_tag.get('content') else None
+        if img_url and not img_url.startswith('http'):
+            img_url = urljoin(STORE_URL, img_url)
+
+        # استخراج قیمت از متادیتا یا متن صفحه
+        formatted_price = ""
+        price_meta = soup.find('meta', property='product:price:amount') or soup.find('meta', property='og:price:amount')
+        if price_meta and price_meta.get('content'):
+            raw_val = re.sub(r'[^\d]', '', price_meta['content'])
+            if raw_val and int(raw_val) > 1000:
+                formatted_price = f"{int(raw_val):,} تومان"
+
+        if not formatted_price:
+            # جستجوی الگوی قیمت فارسی در صفحه (مثلاً 12,500,000 تومان)
+            price_match = re.search(r'([\d,،٬]{4,15})\s*(?:تومان|ریال)', page_text)
+            if price_match:
+                formatted_price = f"{price_match.group(1)} تومان"
+
+        # استخراج توضیح کوتاه
+        desc_meta = soup.find('meta', property='og:description') or soup.find('meta', attrs={'name': 'description'})
+        short_desc = clean_raw_text(desc_meta['content']) if desc_meta and desc_meta.get('content') else ""
+        if len(short_desc) > 220:
+            short_desc = short_desc[:217] + "..."
+
+        return {
+            'id': url,
+            'name': name,
+            'price': formatted_price,
+            'link': url,
+            'image_url': img_url,
+            'short_desc': short_desc
+        }
+    except Exception as e:
+        print(f"Error parsing product page {url}: {e}")
+        return None
+
+async def fetch_random_in_stock_products(count=3):
+    """انتخاب ۳ محصول تصادفی و موجود از بین لینک‌های کشف‌شده سایت"""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'fa-IR,fa;q=0.9,en;q=0.8'
+    }
+    recently_sent_ids = get_recently_sent_product_ids()
+    selected_products = []
+
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            all_urls = await discover_product_urls_from_site(session)
+            print(f"تعداد {len(all_urls)} لینک محصول در سایت {STORE_URL} شناسایی شد.")
+
+            # فیلتر کردن محصولاتی که در ۲۴ ساعت اخیر ارسال نشده‌اند
+            candidate_urls = [u for u in all_urls if u not in recently_sent_ids]
+            if not candidate_urls:
+                candidate_urls = all_urls
+
+            random.shuffle(candidate_urls)
+
+            # بررسی حداکثر ۱۵ لینک تصادفی تا رسیدن به ۳ محصول موجود و کامل
+            for prod_url in candidate_urls[:15]:
+                if len(selected_products) >= count:
+                    break
+                prod_data = await parse_single_product_page(session, prod_url)
+                if prod_data:
+                    selected_products.append(prod_data)
+                await asyncio.sleep(1)
 
     except Exception as e:
-        print(f"Error fetching products from {STORE_URL}: {e}")
+        print(f"Error in store product discovery: {e}")
 
-    if not in_stock_products:
-        return []
-
-    return random.sample(in_stock_products, min(count, len(in_stock_products)))
+    return selected_products
 
 async def publish_random_store_products():
     """انتشار ۳ محصول رندوم به همراه دکمه شیشه‌ای خرید اقساطی"""
     products = await fetch_random_in_stock_products(count=PRODUCTS_PER_HOUR)
     if not products:
-        print("هیچ محصول جدید و موجودی از سایت دریافت نشد.")
+        print("⚠️ محصولی از سایت استخراج نشد (احتمالاً ساختار لینک‌ها یا دسترسی سایت محدود است).")
         return
 
     print(f"Publishing {len(products)} random in-stock products to {TARGET_CHANNEL}...")
@@ -735,7 +825,6 @@ async def background_news_loop(app_bot):
     print("RSS News & Store Bot worker is running...")
     tehran_tz = ZoneInfo("Asia/Tehran")
 
-    # تاخیر ۱۵ ثانیه‌ای برای اطمینان از بسته شدن کانتینر قبلی در Railway
     await asyncio.sleep(15)
 
     while True:
