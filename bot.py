@@ -709,6 +709,7 @@ async def process_and_publish_batch():
             save_published_topic(sel['topic_fingerprint'])
 
             news_link = orig_item.get('link', 'https://t.me/jazebestore')
+            # نکته مهم: در پست‌های کانال فقط از url یا switch_inline_query استفاده می‌شود
             keyboard = [
                 [
                     InlineKeyboardButton("❤️ 0", callback_data=f"like_{orig_item['id']}"),
@@ -716,7 +717,7 @@ async def process_and_publish_batch():
                 ],
                 [
                     InlineKeyboardButton("🤖 چت با هوش مصنوعی", url=bot_chat_url),
-                    InlineKeyboardButton("🔍 جستجوی کالا", switch_inline_query_current_chat="")
+                    InlineKeyboardButton("🔍 جستجوی کالا", switch_inline_query="")
                 ]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -963,7 +964,6 @@ async def sync_and_fetch_store_products(count=3) -> list[dict]:
     except Exception as e:
         print(f"Error syncing store catalog: {e}")
 
-    # ذخیره محصولات کشف‌شده در کش SQLite برای استفاده فوری در Inline Mode و AI Assistant
     if discovered_products:
         save_products_to_cache(discovered_products)
 
@@ -1002,11 +1002,12 @@ async def publish_random_store_products():
         caption_parts.append("\n🏷 #فروشگاه #خرید_اقساطی")
         final_caption = "\n".join(caption_parts) + CHANNEL_SIGNATURE
 
+        # نکته مهم: در پست‌های کانال فقط از url یا switch_inline_query استفاده می‌شود
         keyboard = [
             [InlineKeyboardButton("💳 خرید اقساطی این محصول", url=prod['link'])],
             [
                 InlineKeyboardButton("🤖 مشاوره هوشمند خرید", url=bot_chat_url),
-                InlineKeyboardButton("🔍 جستجوی کالا", switch_inline_query_current_chat="")
+                InlineKeyboardButton("🔍 جستجوی کالا", switch_inline_query="")
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1059,7 +1060,7 @@ async def start_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
         "💬 <i>همین الان هر سوالی درباره بازی‌ها، سخت‌افزار یا خرید محصول دارید بنویسید تا راهنمایی‌تان کنم:</i>"
     )
     keyboard = [
-        [InlineKeyboardButton("🔍 جستجوی سریع محصولات (Inline)", switch_inline_query_current_chat="")],
+        [InlineKeyboardButton("🔍 جستجوی سریع محصولات (در همین چت)", switch_inline_query_current_chat="")],
         [InlineKeyboardButton("📤 اشتراک‌گذاری محصول با دوستان", switch_inline_query="")],
         [
             InlineKeyboardButton("🌐 سایت جاذبه استور", url=STORE_URL),
@@ -1085,7 +1086,6 @@ async def ai_assistant_message_handler(update: Update, context: ContextTypes.DEF
     chat_type = update.effective_chat.type
     bot_username = context.bot.username or BOT_USERNAME_CACHE or "jazebestore_bot"
 
-    # در گروه‌ها (مثل گروه کامنت‌های کانال)، فقط در صورت ریپلای روی ربات یا منشن کردن آیدی ربات پاسخ بده
     if chat_type in ["group", "supergroup"]:
         is_reply_to_bot = (
             message.reply_to_message
@@ -1108,7 +1108,6 @@ async def ai_assistant_message_handler(update: Update, context: ContextTypes.DEF
     user_id = update.effective_user.id if update.effective_user else 0
     history_list = list(user_chat_histories[user_id])
 
-    # جستجوی محصولات مرتبط در کش فروشگاه بر اساس کلمات کلیدی پیام کاربر
     matched_products = search_cached_products(user_text, limit=5)
     if not matched_products:
         matched_products = search_cached_products("", limit=5)
@@ -1186,11 +1185,12 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             f"{CHANNEL_SIGNATURE}"
         )
 
+        # در پیام‌های ارسالی از طریق Inline هم از switch_inline_query استفاده می‌کنیم تا در کانال یا گروه خطا ندهد
         reply_markup = InlineKeyboardMarkup([
             [InlineKeyboardButton("💳 خرید اقساطی و مشاهده محصول", url=prod_link)],
             [
                 InlineKeyboardButton("🤖 مشاوره هوشمند خرید", url=bot_chat_url),
-                InlineKeyboardButton("🔍 جستجوی سایر محصولات", switch_inline_query_current_chat="")
+                InlineKeyboardButton("🔍 جستجوی سایر محصولات", switch_inline_query="")
             ]
         ])
 
@@ -1275,7 +1275,6 @@ async def background_news_loop(app_bot):
 
     await asyncio.sleep(10)
 
-    # همگام‌سازی اولیه محصولات فروشگاه در بدو شروع ربات تا جستجوی اینلاین بلافاصله پر باشد
     try:
         print("Initial store catalog sync for Inline Search & AI Assistant...")
         await sync_and_fetch_store_products(count=1)
@@ -1293,7 +1292,6 @@ async def background_news_loop(app_bot):
                 print(f"Collected {len(pending_news_buffer)} new candidate items. Processing top {MAX_NEWS_PER_HOUR}...")
                 await process_and_publish_batch()
                 
-                # دریافت و انتشار ۳ محصول رندوم موجود از سایت + آپدیت کش محصولات
                 await publish_random_store_products()
             else:
                 print(f"Outside active hours (Tehran time hour: {current_hour}). Bot is resting...")
@@ -1305,12 +1303,11 @@ async def background_news_loop(app_bot):
 
 def main():
     print("Waiting 20 seconds for old container to shut down cleanly...")
-    time.sleep(20)  # جلوگیری کامل از خطای Conflict در زمان دیپلوی مجدد روی Railway
+    time.sleep(20)
 
     init_db()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # ثبت هندلرهای کامل ربات
     application.add_handler(CommandHandler("start", start_command_handler))
     application.add_handler(CommandHandler("help", start_command_handler))
     application.add_handler(InlineQueryHandler(inline_query_handler))
