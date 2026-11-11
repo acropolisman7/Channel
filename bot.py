@@ -212,8 +212,8 @@ pending_news_buffer = []
 # حافظه کوتاه‌مدت چت کاربران با دستیار هوشمند (حداکثر ۶ پیام آخر برای هر کاربر)
 user_chat_histories = defaultdict(lambda: deque(maxlen=6))
 
-async def get_bot_chat_url() -> str:
-    """دریافت خودکار یوزرنیم ربات و ساخت لینک مستقیم ورود به چت هوش مصنوعی"""
+async def get_bot_links() -> tuple[str, str]:
+    """دریافت خودکار یوزرنیم ربات و ساخت لینک‌های استاندارد URL برای دکمه‌های کانال"""
     global BOT_USERNAME_CACHE
     if not BOT_USERNAME_CACHE:
         try:
@@ -222,8 +222,10 @@ async def get_bot_chat_url() -> str:
         except Exception:
             pass
     if BOT_USERNAME_CACHE:
-        return f"https://t.me/{BOT_USERNAME_CACHE}?start=advisor"
-    return STORE_URL
+        advisor_url = f"https://t.me/{BOT_USERNAME_CACHE}?start=advisor"
+        search_url = f"https://t.me/{BOT_USERNAME_CACHE}?start=search"
+        return advisor_url, search_url
+    return STORE_URL, STORE_URL
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -442,7 +444,6 @@ class BatchProcessResult(BaseModel):
 
 # ================= ۵. موتور پردازش چندگانه AI (اخبار + دستیار چت) =================
 async def generate_news_with_fallback(prompt: str) -> dict | None:
-    # ۱. تست تمام کلیدها و مدل‌های جمنای (غیرمسدودکننده با to_thread)
     for key_idx, api_key in enumerate(GEMINI_API_KEYS, start=1):
         temp_client = genai.Client(api_key=api_key)
         for model_name in GEMINI_MODELS:
@@ -483,7 +484,6 @@ async def generate_news_with_fallback(prompt: str) -> dict | None:
     }
     """
 
-    # ۲. تست تمام کلیدهای Groq
     for key_idx, groq_key in enumerate(GROQ_API_KEYS, start=1):
         try:
             print(f"تلاش با Groq (کلید #{key_idx})...")
@@ -503,7 +503,6 @@ async def generate_news_with_fallback(prompt: str) -> dict | None:
             print(f"⚠️ خطا در Groq (کلید #{key_idx}): {e}")
             await asyncio.sleep(2)
 
-    # ۳. تست تمام کلیدهای OpenRouter
     for key_idx, or_key in enumerate(OPENROUTER_API_KEYS, start=1):
         try:
             print(f"تلاش با OpenRouter (کلید #{key_idx})...")
@@ -529,7 +528,6 @@ async def generate_chat_reply_with_fallback(system_prompt: str, user_message: st
     """موتور پاسخگویی سریع برای دستیار هوشمند (چت با کاربران)"""
     full_prompt = f"{system_prompt}\n\nUser Question:\n{user_message}"
 
-    # ۱. تلاش با کلیدهای جمنای
     for api_key in GEMINI_API_KEYS:
         temp_client = genai.Client(api_key=api_key)
         for model_name in GEMINI_MODELS:
@@ -545,7 +543,6 @@ async def generate_chat_reply_with_fallback(system_prompt: str, user_message: st
             except Exception:
                 continue
 
-    # ۲. تلاش با کلیدهای Groq
     for groq_key in GROQ_API_KEYS:
         try:
             groq_client = AsyncOpenAI(api_key=groq_key, base_url="https://api.groq.com/openai/v1")
@@ -561,7 +558,6 @@ async def generate_chat_reply_with_fallback(system_prompt: str, user_message: st
         except Exception:
             continue
 
-    # ۳. تلاش با کلیدهای OpenRouter
     for or_key in OPENROUTER_API_KEYS:
         try:
             or_client = AsyncOpenAI(api_key=or_key, base_url="https://openrouter.ai/api/v1")
@@ -685,7 +681,7 @@ async def process_and_publish_batch():
     try:
         selected_items = result_data.get("selected_news", [])[:MAX_NEWS_PER_HOUR]
         batch_map = {item['id']: item for item in current_batch}
-        bot_chat_url = await get_bot_chat_url()
+        advisor_url, search_url = await get_bot_links()
 
         for sel in selected_items:
             orig_item = batch_map.get(sel['selected_id'])
@@ -709,15 +705,15 @@ async def process_and_publish_batch():
             save_published_topic(sel['topic_fingerprint'])
 
             news_link = orig_item.get('link', 'https://t.me/jazebestore')
-            # نکته مهم: در پست‌های کانال فقط از url یا switch_inline_query استفاده می‌شود
+            # در کانال تلگرام فقط از دکمه‌های url و callback_data استفاده می‌شود
             keyboard = [
                 [
                     InlineKeyboardButton("❤️ 0", callback_data=f"like_{orig_item['id']}"),
                     InlineKeyboardButton("🔗 متن کامل خبر", url=news_link)
                 ],
                 [
-                    InlineKeyboardButton("🤖 چت با هوش مصنوعی", url=bot_chat_url),
-                    InlineKeyboardButton("🔍 جستجوی کالا", switch_inline_query="")
+                    InlineKeyboardButton("🤖 چت با هوش مصنوعی", url=advisor_url),
+                    InlineKeyboardButton("🔍 جستجوی کالا", url=search_url)
                 ]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -751,7 +747,6 @@ async def process_and_publish_batch():
 
             await asyncio.sleep(5)
 
-        # ارسال نظرسنجی خودکار در کانال (در صورت گذشتن زمان مجاز)
         poll_info = result_data.get("interactive_poll")
         if poll_info and can_publish_poll():
             q_text = poll_info.get("question", "").strip()
@@ -908,7 +903,6 @@ async def sync_and_fetch_store_products(count=3) -> list[dict]:
 
     try:
         async with aiohttp.ClientSession(headers=headers) as session:
-            # لایه اول: دریافت سریع لیست محصولات از WooCommerce Store API در صورت فعال بودن
             api_url = f"{STORE_URL}/wp-json/wc/store/v1/products?per_page=80"
             try:
                 async with session.get(api_url, timeout=15, ssl=False) as resp:
@@ -945,7 +939,6 @@ async def sync_and_fetch_store_products(count=3) -> list[dict]:
             except Exception:
                 pass
 
-            # لایه دوم: اگر API بسته بود، کشف از Sitemap و صفحات HTML
             if not discovered_products:
                 all_urls = await discover_product_urls_from_site(session)
                 print(f"تعداد {len(all_urls)} لینک محصول از نقشه سایت شناسایی شد.")
@@ -985,7 +978,7 @@ async def publish_random_store_products():
         print("⚠️ محصولی برای انتشار ساعتی یافت نشد.")
         return
 
-    bot_chat_url = await get_bot_chat_url()
+    advisor_url, search_url = await get_bot_links()
     print(f"Publishing {len(products)} random in-stock products to {TARGET_CHANNEL}...")
 
     for prod in products:
@@ -1002,12 +995,12 @@ async def publish_random_store_products():
         caption_parts.append("\n🏷 #فروشگاه #خرید_اقساطی")
         final_caption = "\n".join(caption_parts) + CHANNEL_SIGNATURE
 
-        # نکته مهم: در پست‌های کانال فقط از url یا switch_inline_query استفاده می‌شود
+        # در کانال تلگرام فقط از دکمه‌های url استفاده می‌شود تا خطا ندهد
         keyboard = [
             [InlineKeyboardButton("💳 خرید اقساطی این محصول", url=prod['link'])],
             [
-                InlineKeyboardButton("🤖 مشاوره هوشمند خرید", url=bot_chat_url),
-                InlineKeyboardButton("🔍 جستجوی کالا", switch_inline_query="")
+                InlineKeyboardButton("🤖 مشاوره هوشمند خرید", url=advisor_url),
+                InlineKeyboardButton("🔍 جستجوی کالا", url=search_url)
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1048,19 +1041,30 @@ async def publish_random_store_products():
 
 # ================= ۹. قابلیت اول: دستیار هوشمند (AI Assistant) در ربات و گروه =================
 async def start_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """پیام خوش‌آمدگویی حرفه‌ای به همراه دکمه‌های دسترسی سریع برای مخاطب"""
+    """پیام خوش‌آمدگویی هوشمند با تشخیص ورودی از دکمه جستجو یا مشاوره کانال"""
     if not update.message:
         return
-    welcome_text = (
-        "سلام! به دستیار هوشمند <b>جاذبه استور (Jazebe Store)</b> خوش آمدید 🎮✨\n\n"
-        "من اینجا هستم تا به شما کمک کنم:\n"
-        "🔹 <b>مشاوره تخصصی خرید:</b> مقایسه کنسول‌ها، کارت‌های گرافیک، لپ‌تاپ و قطعات سخت‌افزاری\n"
-        "🔹 <b>استعلام محصولات و خرید اقساطی:</b> معرفی محصولات موجود در فروشگاه با لینک مستقیم خرید اقساطی\n"
-        "🔹 <b>جستجوی آنی (Inline):</b> با زدن دکمه زیر می‌توانید محصولات فروشگاه را در یک ثانیه جستجو و مشاهده کنید!\n\n"
-        "💬 <i>همین الان هر سوالی درباره بازی‌ها، سخت‌افزار یا خرید محصول دارید بنویسید تا راهنمایی‌تان کنم:</i>"
-    )
+
+    arg = context.args[0].lower() if context.args else ""
+
+    if arg == "search":
+        welcome_text = (
+            "🔍 <b>جستجوی آنی محصولات جاذبه استور</b>\n\n"
+            "برای جستجوی سریع بین محصولات موجود سایت و مشاهده قیمت و شرایط اقساطی، روی دکمه <b>«🔍 شروع جستجو»</b> زیر بزنید و نام محصول را تایپ کنید:"
+        )
+    else:
+        welcome_text = (
+            "سلام! به دستیار هوشمند <b>جاذبه استور (Jazebe Store)</b> خوش آمدید 🎮✨\n\n"
+            "من اینجا هستم تا به شما کمک کنم:\n"
+            "🔹 <b>مشاوره تخصصی خرید:</b> مقایسه کنسول‌ها، کارت‌های گرافیک، لپ‌تاپ و قطعات سخت‌افزاری\n"
+            "🔹 <b>استعلام محصولات و خرید اقساطی:</b> معرفی محصولات موجود در فروشگاه با لینک مستقیم خرید اقساطی\n"
+            "🔹 <b>جستجوی آنی (Inline):</b> با زدن دکمه زیر می‌توانید محصولات فروشگاه را در یک ثانیه جستجو و مشاهده کنید!\n\n"
+            "💬 <i>همین الان هر سوالی درباره بازی‌ها، سخت‌افزار یا خرید محصول دارید بنویسید تا راهنمایی‌تان کنم:</i>"
+        )
+
+    # در چت خصوصی با ربات، استفاده از switch_inline_query_current_chat کاملاً مجاز است
     keyboard = [
-        [InlineKeyboardButton("🔍 جستجوی سریع محصولات (در همین چت)", switch_inline_query_current_chat="")],
+        [InlineKeyboardButton("🔍 شروع جستجوی سریع محصولات", switch_inline_query_current_chat="")],
         [InlineKeyboardButton("📤 اشتراک‌گذاری محصول با دوستان", switch_inline_query="")],
         [
             InlineKeyboardButton("🌐 سایت جاذبه استور", url=STORE_URL),
@@ -1141,12 +1145,22 @@ async def ai_assistant_message_handler(update: Update, context: ContextTypes.DEF
     user_chat_histories[user_id].append({"role": "User", "text": user_text[:300]})
     user_chat_histories[user_id].append({"role": "Assistant", "text": ai_reply[:400]})
 
-    keyboard = [
-        [
-            InlineKeyboardButton("💳 مشاهده سایت و خرید اقساطی", url=STORE_URL),
-            InlineKeyboardButton("🔍 جستجوی محصول", switch_inline_query_current_chat="")
+    advisor_url, search_url = await get_bot_links()
+    if chat_type == "private":
+        keyboard = [
+            [
+                InlineKeyboardButton("💳 مشاهده سایت و خرید اقساطی", url=STORE_URL),
+                InlineKeyboardButton("🔍 جستجوی محصول", switch_inline_query_current_chat="")
+            ]
         ]
-    ]
+    else:
+        keyboard = [
+            [
+                InlineKeyboardButton("💳 مشاهده سایت و خرید اقساطی", url=STORE_URL),
+                InlineKeyboardButton("🔍 جستجوی محصول", url=search_url)
+            ]
+        ]
+
     await message.reply_text(
         safe_reply,
         parse_mode="HTML",
@@ -1163,7 +1177,7 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     query_str = inline_query.query.strip()
     products = search_cached_products(query_str, limit=25)
-    bot_chat_url = await get_bot_chat_url()
+    advisor_url, search_url = await get_bot_links()
 
     results = []
     for prod in products:
@@ -1185,12 +1199,12 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             f"{CHANNEL_SIGNATURE}"
         )
 
-        # در پیام‌های ارسالی از طریق Inline هم از switch_inline_query استفاده می‌کنیم تا در کانال یا گروه خطا ندهد
+        # استفاده از url برای سازگاری با همه چت‌ها و کانال‌ها
         reply_markup = InlineKeyboardMarkup([
             [InlineKeyboardButton("💳 خرید اقساطی و مشاهده محصول", url=prod_link)],
             [
-                InlineKeyboardButton("🤖 مشاوره هوشمند خرید", url=bot_chat_url),
-                InlineKeyboardButton("🔍 جستجوی سایر محصولات", switch_inline_query="")
+                InlineKeyboardButton("🤖 مشاوره هوشمند خرید", url=advisor_url),
+                InlineKeyboardButton("🔍 جستجوی سایر محصولات", url=search_url)
             ]
         ])
 
@@ -1227,7 +1241,7 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 ),
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("💳 ورود به سایت جاذبه استور", url=STORE_URL)],
-                    [InlineKeyboardButton("🤖 چت با هوش مصنوعی جاذبه استور", url=bot_chat_url)]
+                    [InlineKeyboardButton("🤖 چت با هوش مصنوعی جاذبه استور", url=advisor_url)]
                 ])
             )
         )
@@ -1269,7 +1283,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def background_news_loop(app_bot):
     init_db()
-    await get_bot_chat_url()
+    await get_bot_links()
     print("RSS News, Store Sync, Polls & AI Assistant worker is running...")
     tehran_tz = ZoneInfo("Asia/Tehran")
 
