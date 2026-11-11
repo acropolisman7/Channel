@@ -3,6 +3,7 @@ import sqlite3
 import re
 import os
 import json
+import random
 import aiohttp
 import feedparser
 from datetime import datetime
@@ -11,173 +12,37 @@ from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
-from openai import AsyncOpenAI
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CallbackQueryHandler, ContextTypes
 
-# ================= ۱. تنظیمات اصلی و خواندن کلیدها از Railway =================
+# ================= ۱. تنظیمات اصلی و کلیدها =================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY")
 
-# خواندن کلیدهای جمنای (پشتیبانی از ۳ کلید مجزا از جیمیل‌های مختلف)
-GEMINI_API_KEYS = [
-    k.strip() for k in [
-        os.environ.get("GEMINI_API_KEY", ""),
-        os.environ.get("GEMINI_API_KEY_2", ""),
-        os.environ.get("GEMINI_API_KEY_3", "")
-    ] if k.strip() and not k.startswith("YOUR_")
+TARGET_CHANNEL = '@jazebestore'                    # آیدی کانال مقصد شما
+CHANNEL_SIGNATURE = "\n\n🎮 @jazebestore"          # امضای انتهای پست
+CHECK_INTERVAL_SECONDS = 3600                      # بررسی سایت‌ها هر ۱ ساعت
+STORE_URL = "https://jazebestore.com"              # آدرس فروشگاه شما
+PRODUCTS_PER_HOUR = 3                              # تعداد محصولات رندوم در هر ساعت
+
+# لیست فیدهای RSS معتبر گیمینگ و تکنولوژی
+SOURCE_RSS_URLS = [
+    'https://feeds.feedburner.com/ign/games-all',
+    'https://www.videogameschronicle.com/feed/',
+    'https://www.theverge.com/rss/index.xml',
+    'https://feeds.macrumors.com/MacRumors-All',
+    'https://9to5mac.com/feed/',
+    'https://www.zoomit.ir/feed/',
+    'https://digiato.com/feed',
+    'https://www.zoomg.ir/feed/',
+    'https://vigiato.net/feed',
+    'https://gamefa.com/feed',
 ]
 
-# خواندن لیست کلیدهای Groq و OpenRouter (جدا شده با ویرگول در متغیرهای Railway)
-GROQ_API_KEYS = [k.strip() for k in os.environ.get("GROQ_API_KEYS", "").split(",") if k.strip()]
-OPENROUTER_API_KEYS = [k.strip() for k in os.environ.get("OPENROUTER_API_KEYS", "").split(",") if k.strip()]
-
-TARGET_CHANNEL = '@jazebestore'
-CHANNEL_SIGNATURE = "\n\n🎮 @jazebestore"
-CHECK_INTERVAL_SECONDS = 3600
-MAX_NEWS_PER_HOUR = 10
-MAX_CANDIDATES_FOR_AI = 65
-
-# مدل‌های جمنای (فقط نسخه‌های 3.8 و 3.5-lite)
-GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash-lite']
-
-CATEGORY_HASHTAGS = {
-    "gaming": "#گیمینگ",
-    "technology": "#تکنولوژی",
-    "hardware": "#سخت_افزار",
-    "crypto": "#کریپتو",
-    "film_tv": "#سینما_و_تلویزیون",
-    "internet_culture": "#فرهنگ_اینترنتی",
-    "music": "#موسیقی",
-    "general_news": "#اخبار_عمومی"
-}
-
-CATEGORIZED_RSS_SOURCES = {
-    "gaming": [
-        "https://www.ign.com/rss/v2/articles/feed",
-        "https://feeds.feedburner.com/ign/news",
-        "https://feeds.feedburner.com/ign/reviews",
-        "https://feeds.feedburner.com/ign/games-all",
-        "https://www.gamespot.com/feeds/mashup/",
-        "https://www.eurogamer.net/?format=rss",
-        "https://www.videogameschronicle.com/feed/",
-        "https://www.pcgamer.com/feeds.xml",
-        "https://www.polygon.com/rss/index.xml",
-        "https://kotaku.com/rss",
-        "https://www.rockpapershotgun.com/feed",
-        "https://www.gamesindustry.biz/feed",
-        "https://www.gematsu.com/feed",
-        "https://www.pushsquare.com/feeds/latest",
-        "https://www.purexbox.com/feeds/latest",
-        "https://www.nintendolife.com/feeds/latest",
-        "https://www.gamedeveloper.com/rss.xml",
-        "https://blog.playstation.com/feed/",
-        "https://news.xbox.com/en-us/feed/",
-        "https://www.zoomg.ir/feed/",
-        "https://vigiato.net/feed",
-        "https://gamefa.com/feed"
-    ],
-    "technology": [
-        "https://www.theverge.com/rss/index.xml",
-        "https://www.theverge.com/rss/tech/index.xml",
-        "https://feeds.arstechnica.com/arstechnica/index",
-        "https://www.wired.com/feed/rss",
-        "https://techcrunch.com/feed/",
-        "https://techcrunch.com/category/artificial-intelligence/feed/",
-        "https://www.engadget.com/rss.xml",
-        "https://www.cnet.com/rss/news/",
-        "https://www.techradar.com/feeds.xml",
-        "https://gizmodo.com/feed",
-        "https://mashable.com/feeds/rss/all",
-        "https://www.techmeme.com/feed.xml",
-        "https://feeds.macrumors.com/MacRumors-All",
-        "https://9to5mac.com/feed/",
-        "https://www.zoomit.ir/feed/",
-        "https://digiato.com/feed"
-    ],
-    "hardware": [
-        "https://www.tomshardware.com/feeds/all",
-        "https://www.techspot.com/backend.xml",
-        "https://www.notebookcheck.net/RSS-Feed.8156.0.html",
-        "https://www.techpowerup.com/rss/news",
-        "https://www.youtube.com/feeds/videos.xml?channel_id=UCI8iQa1hv7oV_Z8D35vVuSg",
-        "https://www.youtube.com/feeds/videos.xml?channel_id=UChIs72whgZI9w6d6FhwGGHA"
-    ],
-    "crypto": [
-        "https://www.coindesk.com/arc/outboundfeeds/rss/",
-        "https://cointelegraph.com/rss",
-        "https://www.theblock.co/rss.xml",
-        "https://decrypt.co/feed",
-        "https://bitcoinmagazine.com/feed",
-        "https://www.dlnews.com/arc/outboundfeeds/rss/",
-        "https://blockworks.co/feed",
-        "https://cryptoslate.com/feed/",
-        "https://thedefiant.io/feed",
-        "https://u.today/rss",
-        "https://beincrypto.com/feed/",
-        "https://protos.com/feed"
-    ],
-    "film_tv": [
-        "https://variety.com/feed/",
-        "https://variety.com/v/film/feed/",
-        "https://variety.com/v/tv/feed/",
-        "https://variety.com/v/music/feed/",
-        "https://www.hollywoodreporter.com/feed/",
-        "https://deadline.com/feed/",
-        "https://www.indiewire.com/feed/",
-        "https://www.thewrap.com/feed/",
-        "https://collider.com/feed/",
-        "https://screenrant.com/feed/",
-        "https://www.rogerebert.com/feed",
-        "https://www.avclub.com/rss",
-        "https://consequence.net/feed/",
-        "https://www.slashfilm.com/feed/",
-        "https://www.denofgeek.com/feed/",
-        "https://bloody-disgusting.com/feed/"
-    ],
-    "internet_culture": [
-        "https://knowyourmeme.com/newsfeed.rss",
-        "https://knowyourmeme.com/editorials.rss",
-        "https://www.tmz.com/rss.xml",
-        "https://www.buzzfeed.com/index.xml",
-        "https://www.dexerto.com/feed/",
-        "https://www.complex.com/feed/",
-        "https://www.thedailybeast.com/feed",
-        "https://www.vulture.com/rss/index.xml",
-        "https://www.themarysue.com/feed/"
-    ],
-    "music": [
-        "https://www.billboard.com/feed/",
-        "https://www.rollingstone.com/feed/",
-        "https://pitchfork.com/feed/feed-news/rss",
-        "https://pitchfork.com/feed/feed-album-reviews/rss",
-        "https://www.stereogum.com/feed/",
-        "https://www.nme.com/feed",
-        "https://www.musicbusinessworldwide.com/feed/",
-        "https://www.thefader.com/rss",
-        "https://feeds.npr.org/1039/rss.xml",
-        "https://www.digitalmusicnews.com/feed/",
-        "https://musictech.com/feed/",
-        "https://ra.co/xml",
-        "https://www.spin.com/feed/"
-    ],
-    "general_news": [
-        "https://feeds.bbci.co.uk/news/rss.xml",
-        "https://feeds.bbci.co.uk/news/technology/rss.xml",
-        "https://www.theguardian.com/world/rss",
-        "https://feeds.npr.org/1001/rss.xml",
-        "https://www.aljazeera.com/xml/rss/all.xml",
-        "https://www.bloomberg.com/feeds/news.rss",
-        "https://www.bloomberg.com/feeds/markets/news.rss",
-        "https://www.ft.com/rss/home/international",
-        "https://www.cnbc.com/id/100003114/device/rss/rss.html",
-        "https://www.economist.com/finance-and-economics/rss.xml",
-        "https://news.google.com/rss/search?q=site%3Areuters.com&hl=en-US&gl=US&ceid=US:en",
-        "https://news.google.com/rss/search?q=site%3Aapnews.com&hl=en-US&gl=US&ceid=US:en"
-    ]
-}
-
 # ================= ۲. راه‌اندازی دیتابیس و کلاینت‌ها =================
+client_ai = genai.Client(api_key=GEMINI_API_KEY)
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
+
 os.makedirs('temp_media', exist_ok=True)
 pending_news_buffer = []
 
@@ -253,7 +118,8 @@ async def download_image_from_url(url, filename):
     if not url:
         return None
     try:
-        async with aiohttp.ClientSession() as session:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        async with aiohttp.ClientSession(headers=headers) as session:
             async with session.get(url, timeout=15) as resp:
                 if resp.status == 200:
                     filepath = os.path.join('temp_media', filename)
@@ -266,111 +132,24 @@ async def download_image_from_url(url, filename):
 
 # ================= ۴. ساختار خروجی هوش مصنوعی (Schema) =================
 class SelectedNewsItem(BaseModel):
-    selected_id: int = Field(description="ID of the selected news candidate")
-    category_id: str = Field(description="Must be one of: gaming, technology, hardware, crypto, film_tv, internet_culture, music, general_news")
-    topic_hashtags: list[str] = Field(description="2 to 3 specific Persian hashtags starting with # using underscores instead of spaces")
-    topic_fingerprint: str = Field(description="1-sentence English summary for deduplication")
-    final_persian_text: str = Field(description="Formatted Persian news with HTML <b> title and summary body (without hashtags or signature)")
+    selected_id: int
+    topic_fingerprint: str
+    final_persian_text: str
 
 class BatchProcessResult(BaseModel):
     selected_news: list[SelectedNewsItem]
 
-# ================= ۵. موتور پردازش چندگانه AI (Multi-Key & Multi-Provider) =================
-async def generate_news_with_fallback(prompt: str) -> dict | None:
-    # ۱. تست تمام کلیدها و مدل‌های جمنای
-    for key_idx, api_key in enumerate(GEMINI_API_KEYS, start=1):
-        temp_client = genai.Client(api_key=api_key)
-        for model_name in GEMINI_MODELS:
-            try:
-                print(f"تلاش با جمنای (کلید #{key_idx} | مدل: {model_name})...")
-                response = temp_client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=BatchProcessResult,
-                        temperature=0.3
-                    )
-                )
-                print(f"✅ موفقیت با جمنای (کلید #{key_idx} | مدل: {model_name})")
-                return json.loads(response.text)
-            except Exception as e:
-                print(f"⚠️ خطا در جمنای (کلید #{key_idx} | {model_name}): {e}")
-                await asyncio.sleep(2)
-
-    json_schema_instruction = """
-    Respond ONLY with a valid JSON object matching this exact schema:
-    {
-      "selected_news": [
-        {
-          "selected_id": 1,
-          "category_id": "gaming",
-          "topic_hashtags": ["#هشتگ_اول", "#هشتگ_دوم"],
-          "topic_fingerprint": "1-sentence English summary",
-          "final_persian_text": "<b>تیتر خبر</b>\\n\\nمتن خلاصه خبر به فارسی..."
-        }
-      ]
-    }
-    """
-
-    # ۲. تست تمام کلیدهای Groq
-    for key_idx, groq_key in enumerate(GROQ_API_KEYS, start=1):
+# ================= ۵. جمع‌آوری اخبار از سایت‌ها =================
+async def fetch_rss_sources():
+    global pending_news_buffer
+    for url in SOURCE_RSS_URLS:
         try:
-            print(f"تلاش با Groq (کلید #{key_idx})...")
-            groq_client = AsyncOpenAI(api_key=groq_key, base_url="https://api.groq.com/openai/v1")
-            completion = await groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": "You are a JSON-only API. " + json_schema_instruction},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.3
-            )
-            print(f"✅ موفقیت با Groq (کلید #{key_idx})")
-            return json.loads(completion.choices[0].message.content)
-        except Exception as e:
-            print(f"⚠️ خطا در Groq (کلید #{key_idx}): {e}")
-            await asyncio.sleep(2)
-
-    # ۳. تست تمام کلیدهای OpenRouter
-    for key_idx, or_key in enumerate(OPENROUTER_API_KEYS, start=1):
-        try:
-            print(f"تلاش با OpenRouter (کلید #{key_idx})...")
-            or_client = AsyncOpenAI(api_key=or_key, base_url="https://openrouter.ai/api/v1")
-            completion = await or_client.chat.completions.create(
-                model="meta-llama/llama-3.3-70b-instruct:free",
-                messages=[
-                    {"role": "system", "content": "You are a JSON-only API. " + json_schema_instruction},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.3
-            )
-            print(f"✅ موفقیت با OpenRouter (کلید #{key_idx})")
-            return json.loads(completion.choices[0].message.content)
-        except Exception as e:
-            print(f"⚠️ خطا در OpenRouter (کلید #{key_idx}): {e}")
-            await asyncio.sleep(2)
-
-    return None
-
-# ================= ۶. جمع‌آوری سریع و هم‌زمان اخبار از فیدها =================
-async def fetch_single_feed(sem, category, url):
-    async with sem:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=12, headers={'User-Agent': 'Mozilla/5.0'}) as resp:
-                    if resp.status != 200:
-                        return []
-                    xml_data = await resp.text()
-            
-            feed = await asyncio.to_thread(feedparser.parse, xml_data)
-            extracted = []
-            for entry in feed.entries[:1]:
+            feed = await asyncio.to_thread(feedparser.parse, url)
+            for entry in feed.entries[:3]:
                 link = getattr(entry, 'link', None)
                 if not link or is_url_seen(link):
                     continue
+                mark_url_seen(link)
                 
                 title = getattr(entry, 'title', '')
                 summary = getattr(entry, 'summary', '')
@@ -380,85 +159,80 @@ async def fetch_single_feed(sem, category, url):
                     continue
 
                 img_url = extract_rss_image(entry)
-                extracted.append({
-                    'category': category,
+                item_id = len(pending_news_buffer) + 1
+                pending_news_buffer.append({
+                    'id': item_id,
                     'source': url,
                     'link': link,
-                    'text': cleaned_body[:450],
+                    'text': cleaned_body,
                     'image_url': img_url
                 })
-            return extracted
-        except Exception:
-            return []
+        except Exception as e:
+            print(f"Error checking RSS {url}: {e}")
 
-async def fetch_rss_sources():
-    global pending_news_buffer
-    if len(pending_news_buffer) > MAX_CANDIDATES_FOR_AI:
-        pending_news_buffer = pending_news_buffer[-MAX_CANDIDATES_FOR_AI:]
-
-    sem = asyncio.Semaphore(15)
-    tasks = []
-    for category, urls in CATEGORIZED_RSS_SOURCES.items():
-        for url in urls:
-            tasks.append(fetch_single_feed(sem, category, url))
-            
-    results = await asyncio.gather(*tasks)
-    
-    for feed_items in results:
-        for item in feed_items:
-            if not is_url_seen(item['link']):
-                mark_url_seen(item['link'])
-                item['id'] = len(pending_news_buffer) + 1
-                pending_news_buffer.append(item)
-
-# ================= ۷. پردازش هوشمند و انتشار در کانال =================
+# ================= ۶. پردازش هوشمند و انتشار اخبار در کانال =================
 async def process_and_publish_batch():
     global pending_news_buffer
     if not pending_news_buffer:
         return
 
-    current_batch = pending_news_buffer[-MAX_CANDIDATES_FOR_AI:]
+    current_batch = pending_news_buffer.copy()
     recent_topics = get_recent_published_topics(limit=50)
-    
     candidates_for_ai = [
-        {
-            "id": item['id'],
-            "default_category": item['category'],
-            "text": item['text'],
-            "has_media": bool(item['image_url'])
-        }
+        {"id": item['id'], "text": item['text'], "has_media": bool(item['image_url'])}
         for item in current_batch
     ]
 
     prompt = f"""
-    You are the Chief Editor for a popular Persian Telegram channel covering Gaming, Tech, Hardware, Crypto, Entertainment, and World News.
-    
-    Already published topics in the last 48 hours (DO NOT repeat these topics):
+    You are the Chief Editor for a Persian Gaming & Technology channel.
+    Already published topics in the last 48 hours (DO NOT repeat):
     {json.dumps(recent_topics, ensure_ascii=False)}
 
-    New incoming news candidates:
+    New incoming news candidates from websites:
     {json.dumps(candidates_for_ai, ensure_ascii=False)}
 
     Tasks:
-    1. Filter out duplicates against history and cluster similar news stories.
-    2. PRIORITY SELECTION: Select AT MOST {MAX_NEWS_PER_HOUR} (maximum 10) of the highest-priority, most breaking, viral, and globally important news items from the candidates. Order them from highest priority to lowest.
-    3. Translate/edit each selected item into fluent journalistic Persian (`final_persian_text`). Wrap ONLY the news title at the very beginning inside HTML bold tags like <b>Title here</b>, followed by double line breaks and the summary. Keep length under 750 chars. Do NOT put hashtags inside `final_persian_text`.
-    4. CRITICAL: Do NOT translate proper nouns, game titles, hardware models, crypto tokens, or company names (keep PlayStation, iPhone, GTA VI, Bitcoin, NVIDIA, etc. in original English form).
-    5. CATEGORIZATION & HASHTAGS:
-       - Assign the most accurate `category_id` from: ["gaming", "technology", "hardware", "crypto", "film_tv", "internet_culture", "music", "general_news"].
-       - Generate 2 to 3 relevant Persian `topic_hashtags` for the news story (e.g., ["#هوش_مصنوعی", "#اپل"]). Always start with # and use underscores (_) instead of spaces.
-    6. Provide a 1-sentence English `topic_fingerprint`.
+    1. Filter out duplicates against history and cluster similar news stories, picking the best and most complete one.
+    2. Translate/edit into fluent journalistic Persian (final_persian_text). Wrap ONLY the news title at the very beginning inside HTML bold tags like <b>Title here</b>, followed by double line breaks and the summary. Length under 850 chars.
+    3. CRITICAL: Do NOT translate proper nouns, game titles, hardware models, or company names (keep PlayStation, iPhone, God of War, Steam, Sony, NVIDIA, etc. in original English form).
+    4. Provide a 1-sentence English topic_fingerprint.
     """
 
-    result_data = await generate_news_with_fallback(prompt)
+    result_data = None
+    max_retries = 3
+    delay = 10
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = client_ai.models.generate_content(
+                model='gemini-3.8-flash',
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=BatchProcessResult,
+                    temperature=0.3
+                )
+            )
+            result_data = json.loads(response.text)
+            break
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str or "ResourceExhausted" in error_str or "ServiceUnavailable" in error_str or "503" in error_str:
+                print(f"خطای شلوغی سرور یا لیمیت (تلاش {attempt} از {max_retries}): {e}")
+            else:
+                print(f"خطای پردازش جمنای (تلاش {attempt}): {e}")
+
+            if attempt == max_retries:
+                print("تلاش‌ها به اتمام رسید. پردازش این دسته به سیکل بعدی موکول شد.")
+                return
+            await asyncio.sleep(delay)
+            delay *= 2
 
     if not result_data:
-        print("❌ تمامی کلیدها و سرویس‌های AI با خطا یا محدودیت مواجه شدند. این چرخه رد شد.")
-        pending_news_buffer.clear()
         return
 
     try:
-        selected_items = result_data.get("selected_news", [])[:MAX_NEWS_PER_HOUR]
+        selected_items = result_data.get("selected_news", [])
         batch_map = {item['id']: item for item in current_batch}
 
         for sel in selected_items:
@@ -466,19 +240,7 @@ async def process_and_publish_batch():
             if not orig_item:
                 continue
 
-            cat_id = sel.get('category_id', orig_item.get('category', 'general_news'))
-            main_cat_hashtag = CATEGORY_HASHTAGS.get(cat_id, "#اخبار")
-            
-            extra_tags = []
-            for tag in sel.get('topic_hashtags', []):
-                clean_tag = tag.strip().replace(" ", "_")
-                if not clean_tag.startswith("#"):
-                    clean_tag = "#" + clean_tag
-                if clean_tag != main_cat_hashtag:
-                    extra_tags.append(clean_tag)
-            
-            hashtags_line = " ".join([main_cat_hashtag] + extra_tags[:3])
-            final_caption = f"{sel['final_persian_text'].strip()}\n\n🏷 {hashtags_line}{CHANNEL_SIGNATURE}"
+            final_caption = sel['final_persian_text'].strip() + CHANNEL_SIGNATURE
             save_published_topic(sel['topic_fingerprint'])
 
             news_link = orig_item.get('link', 'https://t.me/jazebestore')
@@ -492,6 +254,148 @@ async def process_and_publish_batch():
 
             if orig_item['image_url']:
                 img_path = await download_image_from_url(orig_item['image_url'], f"img_{orig_item['id']}.jpg")
+                if img_path and os.path.exists(img_path):
+                    with open(img_path, 'rb') as photo_file:
+                        await bot.send_photo(
+                            chat_id=TARGET_CHANNEL, 
+                            photo=photo_file, 
+                            caption=final_caption, 
+                            parse_mode="HTML",
+                            reply_markup=reply_markup
+                        )
+                    os.remove(img_path)
+                else:
+                    await bot.send_message(
+                        chat_id=TARGET_CHANNEL, 
+                        text=final_caption, 
+                        parse_mode="HTML",
+                        reply_markup=reply_markup
+                    )
+            else:
+                await bot.send_message(
+                    chat_id=TARGET_CHANNEL, 
+                    text=final_caption, 
+                    parse_mode="HTML",
+                    reply_markup=reply_markup
+                )
+
+            await asyncio.sleep(5)
+
+        pending_news_buffer.clear()
+
+    except Exception as e:
+        print(f"Error publishing to channel: {e}")
+
+# ================= ۶.۵ بخش جدید: دریافت و انتشار محصولات موجود سایت =================
+async def fetch_random_in_stock_products(count=3):
+    """دریافت محصولات فعال و دارای موجودی از jazebestore.com"""
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    in_stock_products = []
+
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            # روش اول: استفاده از API عمومی فروشگاه ووکامرس (دقیق‌ترین روش برای تشخیص موجودی)
+            api_url = f"{STORE_URL}/wp-json/wc/store/v1/products?per_page=100"
+            async with session.get(api_url, timeout=20) as resp:
+                if resp.status == 200:
+                    products_data = await resp.json()
+                    for p in products_data:
+                        # بررسی فعال بودن و موجودی کالا
+                        if p.get('is_in_stock') is True and p.get('is_purchasable', True):
+                            name = clean_raw_text(p.get('name', ''))
+                            permalink = p.get('permalink', STORE_URL)
+                            
+                            # استخراج قیمت
+                            prices = p.get('prices', {})
+                            raw_price = prices.get('price', '')
+                            currency_minor_unit = prices.get('currency_minor_unit', 0)
+                            formatted_price = ""
+                            if raw_price and raw_price.isdigit():
+                                val = int(raw_price) // (10 ** currency_minor_unit)
+                                if val > 0:
+                                    formatted_price = f"{val:,} تومان"
+
+                            # استخراج تصویر شاخص محصول
+                            images = p.get('images', [])
+                            img_url = images[0].get('src') if images else None
+
+                            # استخراج توضیح کوتاه
+                            short_desc = clean_raw_text(p.get('short_description', ''))
+                            if len(short_desc) > 250:
+                                short_desc = short_desc[:247] + "..."
+
+                            in_stock_products.append({
+                                'id': p.get('id', random.randint(1000, 9999)),
+                                'name': name,
+                                'price': formatted_price,
+                                'link': permalink,
+                                'image_url': img_url,
+                                'short_desc': short_desc
+                            })
+
+            # روش دوم (جایگزین): اگر API در دسترس نبود، اسکرپ صفحه فروشگاه
+            if not in_stock_products:
+                shop_url = f"{STORE_URL}/shop/"
+                async with session.get(shop_url, timeout=20) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+                        soup = BeautifulSoup(html, 'html.parser')
+                        for item in soup.select('li.product.instock'):
+                            title_el = item.select_one('.woocommerce-loop-product__title, h2, h3')
+                            link_el = item.select_one('a[href]')
+                            img_el = item.select_one('img')
+                            price_el = item.select_one('.price')
+
+                            if title_el and link_el:
+                                in_stock_products.append({
+                                    'id': random.randint(1000, 9999),
+                                    'name': title_el.get_text(strip=True),
+                                    'price': clean_raw_text(price_el.get_text()) if price_el else "",
+                                    'link': link_el['href'],
+                                    'image_url': img_el.get('data-src') or img_el.get('src') if img_el else None,
+                                    'short_desc': ""
+                                })
+
+    except Exception as e:
+        print(f"Error fetching products from {STORE_URL}: {e}")
+
+    if not in_stock_products:
+        return []
+
+    return random.sample(in_stock_products, min(count, len(in_stock_products)))
+
+async def publish_random_store_products():
+    """انتشار ۳ محصول رندوم به همراه دکمه شیشه‌ای خرید اقساطی"""
+    products = await fetch_random_in_stock_products(count=PRODUCTS_PER_HOUR)
+    if not products:
+        print("هیچ محصول موجودی از سایت دریافت نشد.")
+        return
+
+    print(f"Publishing {len(products)} random in-stock products to {TARGET_CHANNEL}...")
+
+    for prod in products:
+        caption_parts = [f"🔥 <b>{prod['name']}</b>"]
+        
+        if prod['short_desc']:
+            caption_parts.append(f"\n📝 {prod['short_desc']}")
+            
+        if prod['price']:
+            caption_parts.append(f"\n💰 قیمت: <b>{prod['price']}</b>")
+            
+        caption_parts.append("\n✅ موجود و آماده ارسال | امکان خرید اقساطی")
+        final_caption = "\n".join(caption_parts) + CHANNEL_SIGNATURE
+
+        # دکمه شیشه‌ای خرید اقساطی متصل به صفحه محصول
+        keyboard = [
+            [
+                InlineKeyboardButton("💳 خرید اقساطی", url=prod['link'])
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        try:
+            if prod['image_url']:
+                img_path = await download_image_from_url(prod['image_url'], f"prod_{prod['id']}.jpg")
                 if img_path and os.path.exists(img_path):
                     with open(img_path, 'rb') as photo_file:
                         await bot.send_photo(
@@ -516,16 +420,12 @@ async def process_and_publish_batch():
                     parse_mode="HTML",
                     reply_markup=reply_markup
                 )
+        except Exception as e:
+            print(f"Error sending product '{prod['name']}': {e}")
 
-            await asyncio.sleep(5)
+        await asyncio.sleep(5)
 
-        pending_news_buffer.clear()
-
-    except Exception as e:
-        print(f"Error publishing to channel: {e}")
-        pending_news_buffer.clear()
-
-# ================= ۸. مدیریت کلیک روی دکمه‌های شیشه‌ای (لایک) =================
+# ================= ۷. مدیریت کلیک روی دکمه‌های شیشه‌ای (لایک) =================
 async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -551,13 +451,10 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             print(f"Error updating like button UI: {e}")
 
-# ================= ۹. حلقه اصلی اجرا و راه‌اندازی ربات =================
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    print(f"Telegram network/update warning: {context.error}")
-
+# ================= ۸. حلقه اصلی اجرا و راه‌اندازی ربات =================
 async def background_news_loop(app_bot):
     init_db()
-    print("RSS News Bot worker is running...")
+    print("RSS News & Store Bot worker is running...")
     tehran_tz = ZoneInfo("Asia/Tehran")
 
     await asyncio.sleep(5)
@@ -568,22 +465,23 @@ async def background_news_loop(app_bot):
             current_hour = now_tehran.hour
 
             if 9 <= current_hour < 23:
-                print(f"[{now_tehran.strftime('%H:%M')}] Fetching RSS feeds concurrently...")
+                # ۱. دریافت و انتشار اخبار
                 await fetch_rss_sources()
-                print(f"Collected {len(pending_news_buffer)} new candidate items. Processing top {MAX_NEWS_PER_HOUR}...")
                 await process_and_publish_batch()
+                
+                # ۲. دریافت و انتشار ۳ محصول رندوم موجود از سایت
+                await publish_random_store_products()
             else:
                 print(f"Outside active hours (Tehran time hour: {current_hour}). Bot is resting...")
 
         except Exception as e:
-            print(f"Error in background news loop: {e}")
+            print(f"Error in background loop: {e}")
 
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
 def main():
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(CallbackQueryHandler(button_click_handler))
-    application.add_error_handler(error_handler)
 
     async def post_init(app: Application):
         asyncio.create_task(background_news_loop(app.bot))
@@ -591,7 +489,7 @@ def main():
     application.post_init = post_init
 
     print("Telegram Bot application started...")
-    application.run_polling(drop_pending_updates=True)
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
