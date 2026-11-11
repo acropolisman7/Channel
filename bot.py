@@ -11,22 +11,34 @@ from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
+from openai import AsyncOpenAI
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CallbackQueryHandler, ContextTypes
 
-# ================= ۱. تنظیمات اصلی و کلیدها =================
+# ================= ۱. تنظیمات اصلی و خواندن کلیدها از Railway =================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY")
 
-TARGET_CHANNEL = '@jazebestore'                    # آیدی کانال مقصد شما
-CHANNEL_SIGNATURE = "\n\n🎮 @jazebestore"          # امضای انتهای پست
-CHECK_INTERVAL_SECONDS = 3600                      # بررسی سایت‌ها هر ۱ ساعت
-MAX_NEWS_PER_HOUR = 10                             # حداکثر تعداد خبر ارسالی در هر ساعت
-MAX_CANDIDATES_FOR_AI = 65                         # حداکثر تعداد خبر ارسالی به AI در هر ساعت (برای جلوگیری از پر شدن سهمیه توکن)
+# خواندن کلیدهای جمنای (پشتیبانی از ۳ کلید مجزا از جیمیل‌های مختلف)
+GEMINI_API_KEYS = [
+    k.strip() for k in [
+        os.environ.get("GEMINI_API_KEY", ""),
+        os.environ.get("GEMINI_API_KEY_2", ""),
+        os.environ.get("GEMINI_API_KEY_3", "")
+    ] if k.strip() and not k.startswith("YOUR_")
+]
 
-# مدل اصلی و مدل‌های پشتیبان در صورت پر شدن سهمیه روزانه (20 RPD)
-PRIMARY_MODEL = 'gemini-3.8-flash'
-FALLBACK_MODELS = ['gemini-3.8-flash']
+# خواندن لیست کلیدهای Groq و OpenRouter (جدا شده با ویرگول در متغیرهای Railway)
+GROQ_API_KEYS = [k.strip() for k in os.environ.get("GROQ_API_KEYS", "").split(",") if k.strip()]
+OPENROUTER_API_KEYS = [k.strip() for k in os.environ.get("OPENROUTER_API_KEYS", "").split(",") if k.strip()]
+
+TARGET_CHANNEL = '@jazebestore'
+CHANNEL_SIGNATURE = "\n\n🎮 @jazebestore"
+CHECK_INTERVAL_SECONDS = 3600
+MAX_NEWS_PER_HOUR = 10
+MAX_CANDIDATES_FOR_AI = 65
+
+# مدل‌های جمنای (فقط نسخه‌های 3.8 و 3.5-lite)
+GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash-lite']
 
 CATEGORY_HASHTAGS = {
     "gaming": "#گیمینگ",
@@ -165,9 +177,7 @@ CATEGORIZED_RSS_SOURCES = {
 }
 
 # ================= ۲. راه‌اندازی دیتابیس و کلاینت‌ها =================
-client_ai = genai.Client(api_key=GEMINI_API_KEY)
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
-
 os.makedirs('temp_media', exist_ok=True)
 pending_news_buffer = []
 
@@ -265,7 +275,87 @@ class SelectedNewsItem(BaseModel):
 class BatchProcessResult(BaseModel):
     selected_news: list[SelectedNewsItem]
 
-# ================= ۵. جمع‌آوری سریع و هم‌زمان اخبار از فیدها =================
+# ================= ۵. موتور پردازش چندگانه AI (Multi-Key & Multi-Provider) =================
+async def generate_news_with_fallback(prompt: str) -> dict | None:
+    # ۱. تست تمام کلیدها و مدل‌های جمنای
+    for key_idx, api_key in enumerate(GEMINI_API_KEYS, start=1):
+        temp_client = genai.Client(api_key=api_key)
+        for model_name in GEMINI_MODELS:
+            try:
+                print(f"تلاش با جمنای (کلید #{key_idx} | مدل: {model_name})...")
+                response = temp_client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=BatchProcessResult,
+                        temperature=0.3
+                    )
+                )
+                print(f"✅ موفقیت با جمنای (کلید #{key_idx} | مدل: {model_name})")
+                return json.loads(response.text)
+            except Exception as e:
+                print(f"⚠️ خطا در جمنای (کلید #{key_idx} | {model_name}): {e}")
+                await asyncio.sleep(2)
+
+    json_schema_instruction = """
+    Respond ONLY with a valid JSON object matching this exact schema:
+    {
+      "selected_news": [
+        {
+          "selected_id": 1,
+          "category_id": "gaming",
+          "topic_hashtags": ["#هشتگ_اول", "#هشتگ_دوم"],
+          "topic_fingerprint": "1-sentence English summary",
+          "final_persian_text": "<b>تیتر خبر</b>\\n\\nمتن خلاصه خبر به فارسی..."
+        }
+      ]
+    }
+    """
+
+    # ۲. تست تمام کلیدهای Groq
+    for key_idx, groq_key in enumerate(GROQ_API_KEYS, start=1):
+        try:
+            print(f"تلاش با Groq (کلید #{key_idx})...")
+            groq_client = AsyncOpenAI(api_key=groq_key, base_url="https://api.groq.com/openai/v1")
+            completion = await groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": "You are a JSON-only API. " + json_schema_instruction},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.3
+            )
+            print(f"✅ موفقیت با Groq (کلید #{key_idx})")
+            return json.loads(completion.choices[0].message.content)
+        except Exception as e:
+            print(f"⚠️ خطا در Groq (کلید #{key_idx}): {e}")
+            await asyncio.sleep(2)
+
+    # ۳. تست تمام کلیدهای OpenRouter
+    for key_idx, or_key in enumerate(OPENROUTER_API_KEYS, start=1):
+        try:
+            print(f"تلاش با OpenRouter (کلید #{key_idx})...")
+            or_client = AsyncOpenAI(api_key=or_key, base_url="https://openrouter.ai/api/v1")
+            completion = await or_client.chat.completions.create(
+                model="meta-llama/llama-3.3-70b-instruct:free",
+                messages=[
+                    {"role": "system", "content": "You are a JSON-only API. " + json_schema_instruction},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.3
+            )
+            print(f"✅ موفقیت با OpenRouter (کلید #{key_idx})")
+            return json.loads(completion.choices[0].message.content)
+        except Exception as e:
+            print(f"⚠️ خطا در OpenRouter (کلید #{key_idx}): {e}")
+            await asyncio.sleep(2)
+
+    return None
+
+# ================= ۶. جمع‌آوری سریع و هم‌زمان اخبار از فیدها =================
 async def fetch_single_feed(sem, category, url):
     async with sem:
         try:
@@ -277,7 +367,6 @@ async def fetch_single_feed(sem, category, url):
             
             feed = await asyncio.to_thread(feedparser.parse, xml_data)
             extracted = []
-            # گرفتن فقط ۱ خبر آخر هر فید در هر ساعت برای جلوگیری از انباشت ۱۷۰+ خبر
             for entry in feed.entries[:1]:
                 link = getattr(entry, 'link', None)
                 if not link or is_url_seen(link):
@@ -304,7 +393,6 @@ async def fetch_single_feed(sem, category, url):
 
 async def fetch_rss_sources():
     global pending_news_buffer
-    # محدود کردن بافر قبلی تا در صورت بروز خطا انباشته نشود
     if len(pending_news_buffer) > MAX_CANDIDATES_FOR_AI:
         pending_news_buffer = pending_news_buffer[-MAX_CANDIDATES_FOR_AI:]
 
@@ -323,13 +411,12 @@ async def fetch_rss_sources():
                 item['id'] = len(pending_news_buffer) + 1
                 pending_news_buffer.append(item)
 
-# ================= ۶. پردازش هوشمند (با مدیریت سهمیه و مدل پشتیبان) =================
+# ================= ۷. پردازش هوشمند و انتشار در کانال =================
 async def process_and_publish_batch():
     global pending_news_buffer
     if not pending_news_buffer:
         return
 
-    # ارسال حداکثر ۶۵ خبر جدیدتر به مدل تا سقف توکن در دقیقه (TPM) پر نشود
     current_batch = pending_news_buffer[-MAX_CANDIDATES_FOR_AI:]
     recent_topics = get_recent_published_topics(limit=50)
     
@@ -363,38 +450,11 @@ async def process_and_publish_batch():
     6. Provide a 1-sentence English `topic_fingerprint`.
     """
 
-    result_data = None
-    models_to_try = [PRIMARY_MODEL] + FALLBACK_MODELS
-
-    for model_name in models_to_try:
-        try:
-            print(f"در حال پردازش با مدل {model_name}...")
-            response = client_ai.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=BatchProcessResult,
-                    temperature=0.3
-                )
-            )
-            result_data = json.loads(response.text)
-            print(f"پردازش با مدل {model_name} با موفقیت انجام شد.")
-            break
-        except Exception as e:
-            error_str = str(e)
-            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                print(f"سهمیه مدل {model_name} پر شده است (429). در حال تست مدل پشتیبان...")
-                await asyncio.sleep(3)
-                continue
-            else:
-                print(f"خطا در مدل {model_name}: {e}")
-                await asyncio.sleep(3)
-                continue
+    result_data = await generate_news_with_fallback(prompt)
 
     if not result_data:
-        print("تمامی مدل‌ها با محدودیت مواجه شدند. این چرخه رد شد تا در ساعت بعدی دوباره تلاش شود.")
-        pending_news_buffer.clear()  # خالی کردن بافر برای جلوگیری از انباشت و مصرف بیش از حد توکن
+        print("❌ تمامی کلیدها و سرویس‌های AI با خطا یا محدودیت مواجه شدند. این چرخه رد شد.")
+        pending_news_buffer.clear()
         return
 
     try:
@@ -465,7 +525,7 @@ async def process_and_publish_batch():
         print(f"Error publishing to channel: {e}")
         pending_news_buffer.clear()
 
-# ================= ۷. مدیریت کلیک روی دکمه‌های شیشه‌ای (لایک) =================
+# ================= ۸. مدیریت کلیک روی دکمه‌های شیشه‌ای (لایک) =================
 async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -491,9 +551,8 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             print(f"Error updating like button UI: {e}")
 
-# ================= ۸. حلقه اصلی اجرا و راه‌اندازی ربات =================
+# ================= ۹. حلقه اصلی اجرا و راه‌اندازی ربات =================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """جلوگیری از کرش کردن لاگ‌ها در زمان تداخل موقت شبکه یا تلگرام"""
     print(f"Telegram network/update warning: {context.error}")
 
 async def background_news_loop(app_bot):
