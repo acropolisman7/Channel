@@ -6,12 +6,13 @@ import json
 import math
 import html
 import random
+import statistics
 import aiohttp
 import feedparser
 from collections import Counter
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from urllib.parse import urljoin, unquote
+from urllib.parse import urljoin, unquote, quote_plus
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field, ValidationError
 from google import genai
@@ -19,7 +20,11 @@ from google.genai import types
 from openai import AsyncOpenAI
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CallbackQueryHandler, ContextTypes
-import jazebe_extras as extras
+
+try:
+    from telegram import ReplyParameters
+except ImportError:
+    ReplyParameters = None
 
 # ================= ۱. تنظیمات اصلی و کلیدهای API =================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
@@ -35,6 +40,10 @@ GEMINI_API_KEYS = [
 GROQ_API_KEYS = [k.strip() for k in os.environ.get("GROQ_API_KEYS", "").split(",") if k.strip()]
 OPENROUTER_API_KEYS = [k.strip() for k in os.environ.get("OPENROUTER_API_KEYS", "").split(",") if k.strip()]
 
+OMDB_API_KEY = os.environ.get("OMDB_API_KEY", "")
+NAVASAN_API_KEY = os.environ.get("NAVASAN_API_KEY", "")
+BRSAPI_KEY = os.environ.get("BRSAPI_KEY", "")
+
 TARGET_CHANNEL = '@jazebestore'
 STORE_BASE_URL = 'https://jazebestore.com'
 CHANNEL_SIGNATURE = "\n\n🎮 @jazebestore"
@@ -46,10 +55,29 @@ REGULAR_CYCLE_SECONDS = 1800
 MAX_NEWS_PER_CYCLE = 15
 MAX_BREAKING_PER_CYCLE = 3
 MAX_CANDIDATES_FOR_AI = 80
-PRODUCTS_PER_CYCLE = 3
 SEMANTIC_SIMILARITY_THRESHOLD = 0.78
 CLUSTER_SIMILARITY_THRESHOLD = 0.72
 HYPE_HALF_LIFE_HOURS = 18.0
+
+# تنظیمات افزونه‌های روزانه و تعاملی
+TEHRAN = ZoneInfo("Asia/Tehran")
+USD_POST_HOUR = 11
+USD_WINDOW_END_HOUR = 14
+DAILY_REC_HOUR = 12
+DAILY_REC_WINDOW_END_HOUR = 17
+MEME_MAX_PER_CYCLE = 2
+MEME_MIN_HYPE = 6
+MEME_STANDALONE_GAP_MIN = 90
+ARTICLE_MAX_CHARS = 2200
+ENRICH_CHUNK = 4
+
+UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+REDDIT_UA = {"User-Agent": "jazebe-news-bot/1.0"}
+MEME_SUBREDDITS = {
+    "gaming", "memes", "pcmasterrace", "playstation", "ps5", "xbox", "nintendo", "nintendoswitch",
+    "gamingmemes", "gamingcirclejerk", "dankmemes", "funny", "me_irl", "technology", "technicallythetruth",
+    "movies", "television", "music", "bitcoin", "cryptocurrency", "apple", "iphone", "android", "gamephysics",
+}
 
 GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash-lite']
 GEMINI_EMBEDDING_MODEL = 'text-embedding-004'
@@ -86,89 +114,6 @@ SERIALIZED_SERIES_HEADERS = {
     "Best Hardware Deals": "🏆 راهنمای ارزش خرید: Best Hardware Deals",
     "This Week in Gaming": "🚀 رویدادهای هفته: This Week in Gaming"
 }
-
-# نگاشت نام‌های مستعار (Alias Mapping) برای تطبیق دقیق اخبار با محصولات دیجیتالی سایت
-PRODUCT_ALIAS_MAP = {
-    "playstation plus": {
-        "triggers": ["playstation plus", "ps plus", "ps+", "پلی استیشن پلاس", "پلی‌استیشن پلاس", "پلاس", "plus essential", "plus extra", "plus premium"],
-        "product_keywords": ["پلاس", "playstation plus", "ps plus", "اشتراک پلاس"],
-        "button_label": "💎 مشاهده و خرید اشتراک PlayStation Plus"
-    },
-    "gta vi": {
-        "triggers": ["gta vi", "gta 6", "grand theft auto vi", "grand theft auto 6", "جی تی ای ۶", "جی تی ای vi"],
-        "product_keywords": ["gta vi", "gta 6", "grand theft auto vi", "جی تی ای 6", "جی تی ای ۶", "gta v", "grand theft auto"],
-        "button_label": "🎮 مشاهده و خرید بازی GTA در فروشگاه"
-    },
-    "ps5 pro": {
-        "triggers": ["ps5 pro", "playstation 5 pro", "پلی استیشن ۵ پرو", "پلی‌استیشن ۵ پرو", "ps5", "playstation 5"],
-        "product_keywords": ["ps5", "پلی استیشن 5", "پلی استیشن ۵", "پلاس", "playstation plus", "اکانت", "ظرفیت"],
-        "button_label": "🎮 مشاهده بازی‌ها و اشتراک‌های سازگار با PlayStation 5"
-    },
-    "ea sports fc": {
-        "triggers": ["fc 27", "ea sports fc 27", "fc 26", "ea sports fc 26", "fc 25", "fifa 27", "اف سی ۲۷", "اف سی ۲۶", "اف سی 27", "اف سی 26"],
-        "product_keywords": ["fc 27", "fc 26", "fc 25", "ea sports fc", "اف سی", "فیفا"],
-        "button_label": "⚽ مشاهده و خرید اکانت و ظرفیت EA SPORTS FC"
-    },
-    "call of duty": {
-        "triggers": ["call of duty", "black ops", "modern warfare", "warzone", "کالاف دیوتی", "کال آو دیوتی"],
-        "product_keywords": ["call of duty", "black ops", "modern warfare", "کالاف", "کال آو دیوتی"],
-        "button_label": "🎮 مشاهده و خرید اکانت Call of Duty"
-    },
-    "resident evil": {
-        "triggers": ["resident evil", "رزیدنت اویل", "resident evil 9"],
-        "product_keywords": ["resident evil", "رزیدنت اویل"],
-        "button_label": "🎮 مشاهده و خرید اکانت Resident Evil"
-    },
-    "ghost of yotei": {
-        "triggers": ["ghost of yotei", "ghost of tsushima", "گوست آو یوتی", "گوست آو سوشیما"],
-        "product_keywords": ["ghost of yotei", "ghost of tsushima", "گوست"],
-        "button_label": "🎮 مشاهده و خرید اکانت سری Ghost"
-    },
-    "elden ring": {
-        "triggers": ["elden ring", "nightreign", "الدن رینگ"],
-        "product_keywords": ["elden ring", "الدن رینگ"],
-        "button_label": "🎮 مشاهده و خرید اکانت Elden Ring"
-    },
-    "god of war": {
-        "triggers": ["god of war", "ragnarok", "گاد آو وار", "خدای جنگ"],
-        "product_keywords": ["god of war", "گاد آف وار", "گاد آو وار"],
-        "button_label": "🎮 مشاهده و خرید اکانت God of War"
-    },
-    "spider-man": {
-        "triggers": ["spider-man", "spiderman", "marvel's spider-man", "اسپایدرمن", "مرد عنکبوتی"],
-        "product_keywords": ["spider-man", "spiderman", "اسپایدرمن"],
-        "button_label": "🎮 مشاهده و خرید اکانت Spider-Man"
-    },
-    "astro bot": {
-        "triggers": ["astro bot", "استرو بات", "آسترو بات"],
-        "product_keywords": ["astro bot", "استرو بات", "آسترو بات"],
-        "button_label": "🎮 مشاهده و خرید اکانت Astro Bot"
-    },
-    "death stranding": {
-        "triggers": ["death stranding", "دث استرندینگ"],
-        "product_keywords": ["death stranding", "دث استرندینگ"],
-        "button_label": "🎮 مشاهده و خرید اکانت Death Stranding"
-    }
-}
-
-DIGITAL_POSITIVE_KEYWORDS = [
-    "اکانت", "ظرفیت", "پلاس", "plus", "playstation plus", "ps plus",
-    "بازی", "game", "گیفت کارت", "gift card", "شتاب", "اشتراک", "پیش خرید", "پیش‌خرید",
-    "fc 27", "fc 26", "fc 25", "gta", "call of duty", "assassin", "god of war",
-    "spider-man", "elden ring", "resident evil", "black myth", "astro bot",
-    "silent hill", "ghost of", "last of us", "cyberpunk", "red dead",
-    "mortal kombat", "tekken", "forza", "halo", "minecraft", "witcher",
-    "battlefield", "death stranding", "final fantasy", "persona"
-]
-
-PHYSICAL_EXCLUDE_KEYWORDS = [
-    "کنسول", "تبلت", "آیپد", "ipad", "آیفون", "iphone", "گوشی", "موبایل",
-    "لپ تاپ", "لپ‌تاپ", "macbook", "مک بوک", "مانیتور", "تلویزیون",
-    "دسته بازی", "dualsense", "دوآل سنس", "هدست", "هدفون", "ایرپاد", "airpods",
-    "پایه شارژر", "دیسک‌خور", "دیسک خور", "ریجن اروپا سری", "کارت گرافیک",
-    "ساعت هوشمند", "apple watch", "اپل واچ", "کیبورد", "ماوس", "موس", "اسپیکر",
-    "هارد", "ssd", "فلش", "پاوربانک", "شارژر", "کابل"
-]
 
 BREAKING_TRIGGER_KEYWORDS = [
     "breaking", "officially announced", "official trailer", "release date announced",
@@ -306,6 +251,7 @@ CATEGORIZED_RSS_SOURCES = {
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 os.makedirs('temp_media', exist_ok=True)
 provider_rotation_index = 0
+_extra_ai_rot = 0
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -338,20 +284,6 @@ def init_db():
                     category TEXT,
                     score REAL DEFAULT 1.0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS digital_products_cache (
-                    url TEXT PRIMARY KEY,
-                    title TEXT,
-                    image_url TEXT,
-                    price TEXT,
-                    in_stock INTEGER DEFAULT 1,
-                    is_purchasable INTEGER DEFAULT 1,
-                    real_features_json TEXT,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS posted_products (
-                    product_url TEXT PRIMARY KEY,
-                    posted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )''')
     c.execute('''CREATE TABLE IF NOT EXISTS bot_metadata (
                     key TEXT PRIMARY KEY,
@@ -410,7 +342,75 @@ def save_published_news_details(item_id: int, fingerprint: str, pub_cat: str, pu
     conn.commit()
     conn.close()
 
-# ================= ۳. موتور Embedding و محاسبه Cosine Similarity =================
+# ================= ۳. زبان فارسی، تاریخ شمسی و ویرایش نگارشی =================
+_FA_DIGITS = "۰۱۲۳۴۵۶۷۸۹"
+_PERSIAN = "\u0600-\u06FF"
+JALALI_MONTHS = ["فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور",
+                 "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند"]
+GREG_MONTHS_FA = ["ژانویه", "فوریه", "مارس", "آوریل", "مه", "ژوئن",
+                  "ژوئیه", "اوت", "سپتامبر", "اکتبر", "نوامبر", "دسامبر"]
+WEEKDAYS_FA = ["دوشنبه", "سه‌شنبه", "چهارشنبه", "پنج‌شنبه", "جمعه", "شنبه", "یکشنبه"]
+
+def now_tehran() -> datetime:
+    return datetime.now(TEHRAN)
+
+def to_fa_digits(value) -> str:
+    return str(value).translate(str.maketrans("0123456789", _FA_DIGITS))
+
+def to_en_digits(value) -> str:
+    return str(value).translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
+
+def gregorian_to_jalali(gy: int, gm: int, gd: int):
+    g_d_m = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+    gy2 = gy + 1 if gm > 2 else gy
+    days = 355666 + (365 * gy) + ((gy2 + 3) // 4) - ((gy2 + 99) // 100) + ((gy2 + 399) // 400) + gd + g_d_m[gm - 1]
+    jy = -1595 + (33 * (days // 12053))
+    days %= 12053
+    jy += 4 * (days // 1461)
+    days %= 1461
+    if days > 365:
+        jy += (days - 1) // 365
+        days = (days - 1) % 365
+    if days < 186:
+        jm = 1 + days // 31
+        jd = 1 + days % 31
+    else:
+        jm = 7 + (days - 186) // 30
+        jd = 1 + (days - 186) % 30
+    return jy, jm, jd
+
+def format_dates(dt: datetime) -> dict:
+    jy, jm, jd = gregorian_to_jalali(dt.year, dt.month, dt.day)
+    weekday = WEEKDAYS_FA[dt.weekday()]
+    return {
+        "weekday": weekday,
+        "jalali": f"{to_fa_digits(jd)} {JALALI_MONTHS[jm - 1]} {to_fa_digits(jy)}",
+        "gregorian": f"{to_fa_digits(dt.day)} {GREG_MONTHS_FA[dt.month - 1]} {to_fa_digits(dt.year)}",
+        "date_key": dt.strftime("%Y-%m-%d"),
+    }
+
+def persian_polish(text: str) -> str:
+    if not text:
+        return text
+    t = text.replace("ي", "ی").replace("ك", "ک")
+    t = re.sub(rf"(?<![{_PERSIAN}])(ن?می) (?=[{_PERSIAN}]{{2,}})", "\\1\u200c", t)
+    t = re.sub(rf"(?<=[{_PERSIAN}]) (ها|های)(?![{_PERSIAN}])", "\u200c\\1", t)
+    t = re.sub(rf"(?<=[{_PERSIAN}]),", "،", t)
+    t = re.sub(rf"(?<=[{_PERSIAN}])\?", "؟", t)
+    t = re.sub(rf"(?<=[{_PERSIAN}]);", "؛", t)
+    t = re.sub(r"\s+([،؛؟.!])", r"\1", t)
+    return t.strip()
+
+def polish_selected(sel) -> None:
+    for field in ("headline_persian", "summary_persian", "background_persian",
+                  "image_alt_persian", "av_transcript_summary_persian"):
+        val = getattr(sel, field, "")
+        if val:
+            setattr(sel, field, persian_polish(val))
+    if getattr(sel, "key_points_persian", None):
+        sel.key_points_persian = [persian_polish(p) for p in sel.key_points_persian]
+
+# ================= ۴. موتور Embedding و محاسبه Cosine Similarity =================
 def compute_local_ngram_embedding(text: str, dim: int = 256) -> list[float]:
     clean = re.sub(r'[^\w\s]', ' ', text.lower())
     tokens = [t for t in clean.split() if len(t) > 2]
@@ -427,23 +427,6 @@ def compute_local_ngram_embedding(text: str, dim: int = 256) -> list[float]:
         vec[idx] += sign * (1.0 + math.log1p(weight))
     norm = math.sqrt(sum(x * x for x in vec))
     return [round(x / norm, 5) for x in vec] if norm > 0 else vec
-
-async def get_text_embedding(text: str) -> list[float]:
-    for api_key in GEMINI_API_KEYS[:1]:
-        try:
-            client = genai.Client(api_key=api_key)
-            res = await asyncio.to_thread(
-                client.models.embed_content,
-                model=GEMINI_EMBEDDING_MODEL,
-                contents=text[:600]
-            )
-            if res and res.embeddings and len(res.embeddings) > 0:
-                vals = list(res.embeddings[0].values)
-                norm = math.sqrt(sum(x * x for x in vals))
-                return [round(x / norm, 5) for x in vals] if norm > 0 else vals
-        except Exception:
-            break
-    return compute_local_ngram_embedding(text)
 
 def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
     if not vec_a or not vec_b or len(vec_a) != len(vec_b):
@@ -495,8 +478,7 @@ async def run_semantic_clustering_and_deduplication():
             'text': r_text,
             'source': src,
             'is_breaking': is_brk,
-            'emb': emb,
-            'duplicate_of_published': False
+            'emb': emb
         })
 
     rejected_ids = []
@@ -548,7 +530,7 @@ async def run_semantic_clustering_and_deduplication():
     conn.commit()
     conn.close()
 
-# ================= ۴. الگوریتم هایپ زمان‌دار (Decay) و شناسایی ترند ۲۴ ساعته =================
+# ================= ۵. الگوریتم هایپ زمان‌دار (Decay) و شناسایی ترند ۲۴ ساعته =================
 def record_hype_event(entity_name: str, category: str, score: float):
     if not entity_name or len(entity_name.strip()) < 2:
         return
@@ -562,25 +544,6 @@ def record_hype_event(entity_name: str, category: str, score: float):
     c.execute("DELETE FROM hype_events WHERE created_at < datetime('now', '-7 days')")
     conn.commit()
     conn.close()
-
-def get_decayed_hype_scores() -> dict[str, float]:
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-        SELECT entity_name, score, (julianday('now') - julianday(created_at)) * 24.0 AS age_hours
-        FROM hype_events
-        WHERE created_at >= datetime('now', '-7 days')
-    """)
-    rows = c.fetchall()
-    conn.close()
-
-    scores = Counter()
-    for name, base_score, age_hours in rows:
-        age = max(0.0, float(age_hours or 0.0))
-        decay_factor = math.pow(0.5, age / HYPE_HALF_LIFE_HOURS)
-        scores[name] += float(base_score) * decay_factor
-
-    return dict(scores.most_common(50))
 
 def detect_24h_trends(top_n: int = 8) -> list[dict]:
     conn = sqlite3.connect(DB_PATH)
@@ -597,7 +560,7 @@ def detect_24h_trends(top_n: int = 8) -> list[dict]:
     conn.close()
     return [{"entity": r[0], "mentions": r[1], "score": round(r[2], 1)} for r in rows]
 
-# ================= ۵. توابع پاک‌سازی، Sanitization HTML و دانلود رسانه =================
+# ================= ۶. توابع پاک‌سازی، Sanitization HTML و ارسال امن =================
 def clean_raw_text(text: str) -> str:
     if not text:
         return ""
@@ -615,7 +578,7 @@ def sanitize_telegram_html(text: str) -> str:
     text = re.sub(r'<\s*em\s*>', '<i>', text, flags=re.IGNORECASE)
     text = re.sub(r'<\s*/\s*em\s*>', '</i>', text, flags=re.IGNORECASE)
 
-    allowed_tags = ['b', 'i', 'u', 's', 'code', 'pre']
+    allowed_tags = ['b', 'i', 'u', 's', 'code', 'pre', 'blockquote']
     placeholders = {}
     counter = 0
 
@@ -678,7 +641,7 @@ async def download_image_from_url(session: aiohttp.ClientSession, url: str, file
     if not url:
         return None
     try:
-        async with session.get(url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'}) as resp:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15), headers=UA) as resp:
             if resp.status == 200:
                 filepath = os.path.join('temp_media', filename)
                 with open(filepath, 'wb') as f:
@@ -688,7 +651,129 @@ async def download_image_from_url(session: aiohttp.ClientSession, url: str, file
         print(f"Error downloading image {url}: {e}")
     return None
 
-# ================= ۶. ساختار خروجی هوش مصنوعی (Schema یکپارچه برای هر ۳ سرویس) =================
+def _visible_len(text: str) -> int:
+    return len(html.unescape(re.sub(r"<[^>]+>", "", text)))
+
+def _strip_tags(text: str) -> str:
+    return html.unescape(re.sub(r"<[^>]+>", "", text))
+
+def _fit_lines(text: str, limit: int) -> str:
+    if _visible_len(text) <= limit:
+        return text
+    lines = text.split("\n")
+    tail = lines[-1]
+    kept = []
+    for line in lines[:-1]:
+        if _visible_len("\n".join(kept + [line, tail])) > limit:
+            break
+        kept.append(line)
+    return "\n".join(kept + [tail])
+
+def _short_caption(text: str, limit: int = 260) -> str:
+    kept = []
+    for line in text.split("\n"):
+        if not line.strip():
+            if kept:
+                break
+            continue
+        if kept and _visible_len("\n".join(kept + [line])) > limit:
+            break
+        kept.append(line)
+    return "\n".join(kept)
+
+def _reply_kwargs(message_id):
+    if not message_id:
+        return {}
+    if ReplyParameters is not None:
+        return {"reply_parameters": ReplyParameters(message_id=message_id, allow_sending_without_reply=True)}
+    return {"reply_to_message_id": message_id, "allow_sending_without_reply": True}
+
+async def send_post(session, text, image_url=None, reply_markup=None, silent=False,
+                    reply_to=None, filename="post.jpg", link_preview=False):
+    text = _fit_lines(text, 4000)
+
+    async def send_text(body, parse_mode, markup, reply_id):
+        return await bot.send_message(
+            chat_id=TARGET_CHANNEL, text=body, parse_mode=parse_mode, reply_markup=markup,
+            disable_notification=silent, disable_web_page_preview=not link_preview,
+            **_reply_kwargs(reply_id))
+
+    async def send_photo(path, caption, parse_mode, markup, reply_id):
+        with open(path, "rb") as fh:
+            return await bot.send_photo(
+                chat_id=TARGET_CHANNEL, photo=fh, caption=caption, parse_mode=parse_mode, reply_markup=markup,
+                disable_notification=silent, **_reply_kwargs(reply_id))
+
+    img_path = None
+    if image_url:
+        img_path = await download_image_from_url(session, image_url, filename)
+    try:
+        async def attempt(body, parse_mode):
+            if img_path and os.path.exists(img_path):
+                try:
+                    if _visible_len(body) <= 1000:
+                        return await send_photo(img_path, body, parse_mode, reply_markup, reply_to)
+                    photo_msg = await send_photo(img_path, _short_caption(body), parse_mode, None, reply_to)
+                    return await send_text(body, parse_mode, reply_markup, photo_msg.message_id)
+                except Exception as photo_err:
+                    if "entities" in str(photo_err).lower() or "parse" in str(photo_err).lower():
+                        raise
+                    print(f"⚠️ ارسال عکس ناموفق بود، ارسال متنی: {photo_err}")
+            return await send_text(body, parse_mode, reply_markup, reply_to)
+
+        try:
+            return await attempt(text, "HTML")
+        except Exception as err:
+            if "entities" in str(err).lower() or "parse" in str(err).lower():
+                print("⚠️ خطای HTML؛ ارسال نسخه‌ی متن ساده.")
+                return await attempt(_strip_tags(text), None)
+            raise
+    finally:
+        if img_path and os.path.exists(img_path):
+            try:
+                os.remove(img_path)
+            except OSError:
+                pass
+
+# ================= ۷. پین کردن تا ۰۰:۰۰ =================
+def _pins_load() -> list:
+    try:
+        return json.loads(get_metadata("pinned_posts", "[]"))
+    except Exception:
+        return []
+
+async def pin_post(message_id: int):
+    try:
+        await bot.pin_chat_message(chat_id=TARGET_CHANNEL, message_id=message_id, disable_notification=True)
+        pins = _pins_load()
+        pins.append({"id": message_id, "date": now_tehran().strftime("%Y-%m-%d")})
+        set_metadata("pinned_posts", json.dumps(pins))
+        print(f"📌 پست {message_id} پین شد (تا ۰۰:۰۰ همین روز).")
+    except Exception as e:
+        print(f"⚠️ پین ناموفق (ربات باید ادمین با دسترسی Pin Messages باشد): {e}")
+
+async def unpin_expired_pins(session=None):
+    today = now_tehran().strftime("%Y-%m-%d")
+    pins = _pins_load()
+    if not pins:
+        return
+    remaining = []
+    for pin in pins:
+        if pin.get("date", today) < today:
+            try:
+                await bot.unpin_chat_message(chat_id=TARGET_CHANNEL, message_id=pin["id"])
+                print(f"📍 پین پست {pin['id']} برداشته شد.")
+            except Exception as e:
+                msg = str(e).lower()
+                if "not found" in msg or "not modified" in msg or "message to unpin" in msg:
+                    continue
+                remaining.append(pin)
+                print(f"⚠️ خطا در برداشتن پین: {e}")
+        else:
+            remaining.append(pin)
+    set_metadata("pinned_posts", json.dumps(remaining))
+
+# ================= ۸. ساختار خروجی هوش مصنوعی (Schema یکپارچه برای هر ۳ سرویس) =================
 class SelectedNewsItem(BaseModel):
     selected_id: int = Field(description="ID of the selected news candidate")
     category_id: str = Field(description="One of: gaming, technology, hardware, crypto, film_tv, internet_culture, fun_meme, music, general_news")
@@ -705,13 +790,13 @@ class SelectedNewsItem(BaseModel):
     av_transcript_summary_persian: str = Field(default="", description="If the source contains video/trailer/audio, provide a clear Persian text transcript/summary of what happens or is said in the video for deaf users")
     topic_hashtags: list[str] = Field(description="2 to 3 specific Persian hashtags starting with # using underscores")
     topic_fingerprint: str = Field(description="1-sentence English summary for deduplication")
-    related_game: str = Field(default="", description="Exact English canonical name of the related game, service, or console (e.g., 'PlayStation Plus', 'GTA VI', 'PS5 Pro', 'EA SPORTS FC 27'), otherwise empty string")
+    related_game: str = Field(default="", description="Exact English canonical name of the related game, service, or console, otherwise empty string")
     hype_score: int = Field(default=5, description="Hype and viral importance score from 1 to 10")
 
 class BatchProcessResult(BaseModel):
     selected_news: list[SelectedNewsItem]
 
-# ================= ۷. موتور پردازش ۳ گانه AI با اعتبارسنجی Pydantic و Retry =================
+# ================= ۹. موتور پردازش ۳ گانه AI با اعتبارسنجی Pydantic و Retry =================
 JSON_SCHEMA_INSTRUCTION = """
 Respond ONLY with a valid JSON object matching this exact schema:
 {
@@ -841,400 +926,682 @@ async def generate_news_with_fallback(prompt: str) -> BatchProcessResult | None:
             return validated_result
     return None
 
-# ================= ۸. ایندکس کامل محصولات دیجیتالی سایت و استخراج واقعی ویژگی‌ها =================
-def is_digital_game_or_plus_product(title: str, url: str = "") -> bool:
-    combined = f"{title} {unquote(url)}".lower()
-    for bad_kw in PHYSICAL_EXCLUDE_KEYWORDS:
-        if bad_kw.lower() in combined:
-            return False
-    for good_kw in DIGITAL_POSITIVE_KEYWORDS:
-        if good_kw.lower() in combined:
-            return True
-    return False
+async def ask_ai_json(prompt: str, model_cls, temperature: float = 0.5):
+    global _extra_ai_rot
+    schema_hint = json.dumps(model_cls.model_json_schema(), ensure_ascii=False)
+    sys_msg = ("You are a JSON API. Respond ONLY with one valid JSON object (no markdown fences) "
+               "that validates against this JSON Schema:\n" + schema_hint)
 
-def extract_real_product_features(page_text: str, short_desc: str = "") -> dict:
-    combined = f"{short_desc} {page_text}"
-    features = {
-        "delivery": "",
-        "warranty": "",
-        "installment": "",
-        "capacities": "",
-        "is_preorder": False
-    }
+    async def gemini_fn():
+        for key in GEMINI_API_KEYS:
+            client = genai.Client(api_key=key)
+            for model in GEMINI_MODELS:
+                try:
+                    resp = await asyncio.to_thread(
+                        client.models.generate_content, model=model, contents=prompt,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json", response_schema=model_cls, temperature=temperature))
+                    return model_cls.model_validate(json.loads(resp.text))
+                except (ValidationError, json.JSONDecodeError):
+                    continue
+                except Exception:
+                    break
+        return None
 
-    delivery_match = re.search(r'(تحویل\s*(?:فوری|آنی|در\s*\d+\s*ساعت|خودکار|ایمیلی|تلگرام))', combined)
-    if delivery_match:
-        features["delivery"] = delivery_match.group(1).strip()
-
-    warranty_match = re.search(r'(گارانتی\s*(?:دائمی|مادام‌العمر|مادام العمر|تعویض|معتبر|رسمی|\d+\s*ماهه)|ضمانت\s*(?:دائمی|بازگشت\s*وجه|اصالت))', combined)
-    if warranty_match:
-        features["warranty"] = warranty_match.group(1).strip()
-
-    if any(k in combined for k in ["اقساط", "قسطی", "اسنپ پی", "اسنپ‌پی", "ترب پی", "دیجی پی", "ازکی وام"]):
-        features["installment"] = "امکان خرید نقد و اقساط (طبق شرایط درج‌شده در صفحه محصول)"
-
-    caps = []
-    if "ظرفیت ۱" in combined or "ظرفیت 1" in combined:
-        caps.append("ظرفیت ۱")
-    if "ظرفیت ۲" in combined or "ظرفیت 2" in combined:
-        caps.append("ظرفیت ۲")
-    if "ظرفیت ۳" in combined or "ظرفیت 3" in combined:
-        caps.append("ظرفیت ۳")
-    if caps:
-        features["capacities"] = "، ".join(caps)
-
-    if "پیش خرید" in combined or "پیش‌خرید" in combined or "pre-order" in combined.lower():
-        features["is_preorder"] = True
-
-    return features
-
-def save_digital_products_to_db(products: list[dict]):
-    if not products:
-        return
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    for p in products:
-        c.execute("""
-            INSERT OR REPLACE INTO digital_products_cache
-            (url, title, image_url, price, in_stock, is_purchasable, real_features_json, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        """, (
-            p['url'],
-            p['title'],
-            p.get('image_url'),
-            p.get('price', 'مشاهده قیمت در صفحه محصول'),
-            1 if p.get('in_stock', True) else 0,
-            1 if p.get('is_purchasable', True) else 0,
-            json.dumps(p.get('real_features', {}), ensure_ascii=False)
-        ))
-    conn.commit()
-    conn.close()
-
-def get_all_available_digital_products() -> list[dict]:
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-        SELECT url, title, image_url, price, in_stock, is_purchasable, real_features_json
-        FROM digital_products_cache
-        WHERE in_stock = 1 AND is_purchasable = 1
-    """)
-    rows = c.fetchall()
-    conn.close()
-    products = []
-    for r in rows:
-        try:
-            feats = json.loads(r[6]) if r[6] else {}
-        except Exception:
-            feats = {}
-        products.append({
-            'url': r[0],
-            'title': r[1],
-            'image_url': r[2],
-            'price': r[3],
-            'in_stock': bool(r[4]),
-            'is_purchasable': bool(r[5]),
-            'real_features': feats
-        })
-    return products
-
-async def discover_all_product_urls_from_site(session: aiohttp.ClientSession) -> list[str]:
-    discovered_urls = set()
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-    sitemap_candidates = [
-        f"{STORE_BASE_URL}/product-sitemap.xml",
-        f"{STORE_BASE_URL}/sitemap_index.xml",
-        f"{STORE_BASE_URL}/sitemap.xml",
-    ]
-
-    for sm_url in sitemap_candidates:
-        try:
-            async with session.get(sm_url, timeout=15, headers=headers) as resp:
-                if resp.status == 200:
-                    xml_text = await resp.text()
-                    locs = re.findall(r'<loc>(https?://[^<]+)</loc>', xml_text)
-                    sub_sitemaps = [u for u in locs if 'product' in u and u.endswith('.xml')]
-                    for sub_sm in sub_sitemaps:
-                        async with session.get(sub_sm, timeout=15, headers=headers) as sub_resp:
-                            if sub_resp.status == 200:
-                                sub_xml = await sub_resp.text()
-                                sub_locs = re.findall(r'<loc>(https?://[^<]+)</loc>', sub_xml)
-                                for u in sub_locs:
-                                    if any(p in u for p in ['/product/', '/products/', '/p/', '/shop/']):
-                                        discovered_urls.add(u)
-                    for u in locs:
-                        if not u.endswith('.xml') and any(p in u for p in ['/product/', '/products/', '/p/']):
-                            discovered_urls.add(u)
-            if discovered_urls:
-                break
-        except Exception:
-            continue
-
-    if not discovered_urls:
-        for page_url in [STORE_BASE_URL, f"{STORE_BASE_URL}/shop", f"{STORE_BASE_URL}/products"]:
+    async def openai_compat(keys, base_url, model):
+        for key in keys:
+            client = AsyncOpenAI(api_key=key, base_url=base_url)
             try:
-                async with session.get(page_url, timeout=15, headers=headers) as resp:
-                    if resp.status == 200:
-                        html_text = await resp.text()
-                        soup = BeautifulSoup(html_text, 'html.parser')
-                        for a in soup.find_all('a', href=True):
-                            full_url = urljoin(STORE_BASE_URL, a['href'])
-                            if full_url.startswith(STORE_BASE_URL) and any(p in full_url for p in ['/product/', '/products/', '/p/']):
-                                discovered_urls.add(full_url)
+                comp = await client.chat.completions.create(
+                    model=model, temperature=temperature, response_format={"type": "json_object"},
+                    messages=[{"role": "system", "content": sys_msg}, {"role": "user", "content": prompt}])
+                return model_cls.model_validate(json.loads(comp.choices[0].message.content))
             except Exception:
                 continue
+        return None
 
-    return [
-        u for u in discovered_urls
-        if not any(bad in unquote(u).lower() for bad in PHYSICAL_EXCLUDE_KEYWORDS)
+    backends = [
+        gemini_fn,
+        lambda: openai_compat(GROQ_API_KEYS, "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
+        lambda: openai_compat(OPENROUTER_API_KEYS, "https://openrouter.ai/api/v1", "meta-llama/llama-3.3-70b-instruct:free"),
     ]
+    start = _extra_ai_rot % 3
+    _extra_ai_rot += 1
+    for fn in backends[start:] + backends[:start]:
+        result = await fn()
+        if result:
+            return result
+    return None
 
-async def scrape_single_digital_product(session: aiohttp.ClientSession, url: str) -> dict | None:
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+# ================= ۱۰. پست روزانه قیمت دلار (ساعت ۱۱) + بیتی از سعدی =================
+FALLBACK_VERSES = [
+    ("بنی‌آدم اعضای یکدیگرند", "که در آفرینش ز یک گوهرند", "گلستان، باب اول، حکایت ۱۰"),
+    ("چو عضوی به درد آورد روزگار", "دگر عضوها را نماند قرار", "گلستان، باب اول، حکایت ۱۰"),
+    ("تو کز محنت دیگران بی‌غمی", "نشاید که نامت نهند آدمی", "گلستان، باب اول، حکایت ۱۰"),
+    ("دوست آن باشد که گیرد دست دوست", "در پریشان‌حالی و درماندگی", "دیوان سعدی"),
+]
+
+def _extract_beit(poem: dict):
+    verses = poem.get("verses") or []
+    full_url = poem.get("fullUrl") or ""
+    if not full_url.startswith("/saadi"):
+        return None
+    pairs = []
+    for i in range(len(verses) - 1):
+        a, b = verses[i], verses[i + 1]
+        if a.get("versePosition") == 0 and b.get("versePosition") == 1:
+            m1, m2 = (a.get("text") or "").strip(), (b.get("text") or "").strip()
+            if 8 <= len(m1) <= 90 and 8 <= len(m2) <= 90:
+                pairs.append((m1, m2))
+    if not pairs:
+        return None
+    m1, m2 = random.choice(pairs)
+    return {"m1": persian_polish(m1), "m2": persian_polish(m2),
+            "title": poem.get("fullTitle") or "دیوان سعدی",
+            "url": "https://ganjoor.net" + full_url}
+
+async def fetch_saadi_verse(session) -> dict:
+    base = "https://api.ganjoor.net/api/ganjoor"
     try:
-        async with session.get(url, timeout=15, headers=headers) as resp:
+        poet_id = get_metadata("ganjoor_saadi_id", "")
+        if not poet_id:
+            async with session.get(f"{base}/poets", timeout=aiohttp.ClientTimeout(total=15), headers=UA) as resp:
+                poets = await resp.json(content_type=None)
+            for p in poets:
+                name = (p.get("name") or "").replace("ي", "ی")
+                if (p.get("fullUrl") or "").strip("/") == "saadi" or name.strip() == "سعدی":
+                    poet_id = str(p["id"])
+                    set_metadata("ganjoor_saadi_id", poet_id)
+                    break
+        if poet_id:
+            for _ in range(8):
+                try:
+                    async with session.get(f"{base}/poem/random?poetId={poet_id}", timeout=aiohttp.ClientTimeout(total=15), headers=UA) as resp:
+                        if resp.status != 200:
+                            continue
+                        poem = await resp.json(content_type=None)
+                    beit = _extract_beit(poem)
+                    if beit:
+                        return beit
+                except Exception:
+                    continue
+    except Exception as e:
+        print(f"⚠️ دریافت شعر از گنجور ناموفق: {e}")
+    m1, m2, title = random.choice(FALLBACK_VERSES)
+    return {"m1": m1, "m2": m2, "title": title, "url": "https://ganjoor.net/saadi/"}
+
+def _usd_ok(v) -> bool:
+    return isinstance(v, int) and 20_000 <= v <= 3_000_000
+
+async def _usd_tgju(session):
+    for url in ("https://call5.tgju.org/ajax.json", "https://call4.tgju.org/ajax.json"):
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
+                if resp.status != 200:
+                    continue
+                data = await resp.json(content_type=None)
+            raw = data["current"]["price_dollar_rl"]["p"]
+            return int(to_en_digits(raw).replace(",", "")) // 10
+        except Exception:
+            continue
+    return None
+
+async def _usd_alanchand(session):
+    try:
+        async with session.get("https://alanchand.com/currencies-price/usd", timeout=aiohttp.ClientTimeout(total=15), headers=UA) as resp:
             if resp.status != 200:
                 return None
-            html_text = await resp.text()
-
-        soup = BeautifulSoup(html_text, 'html.parser')
-
-        title = None
-        og_title = soup.find('meta', property='og:title')
-        if og_title and og_title.get('content'):
-            title = og_title['content'].split('|')[0].split('- جاذبه')[0].strip()
-        if not title and soup.find('h1'):
-            title = soup.find('h1').get_text(strip=True)
-        if not title or not is_digital_game_or_plus_product(title, url):
-            return None
-
-        page_text = soup.get_text(" ", strip=True)
-        avail_meta = soup.find('meta', property='og:availability') or soup.find('meta', property='product:availability')
-        in_stock = True
-        if avail_meta and 'outofstock' in str(avail_meta.get('content', '')).lower():
-            in_stock = False
-        if ('ناموجود' in page_text or 'اتمام موجودی' in page_text) and 'افزودن به سبد' not in page_text:
-            in_stock = False
-
-        image_url = None
-        og_img = soup.find('meta', property='og:image')
-        if og_img and og_img.get('content'):
-            image_url = og_img['content']
-
-        price_str = ""
-        price_meta = soup.find('meta', property='product:price:amount') or soup.find('meta', property='og:price:amount')
-        if price_meta and price_meta.get('content'):
-            try:
-                raw_price = int(float(str(price_meta['content']).replace(',', '').strip()))
-                if raw_price > 0:
-                    price_str = f"{raw_price:,} تومان"
-            except Exception:
-                pass
-        if not price_str:
-            price_match = re.search(r'(\d{1,3}(?:,\d{3})+)\s*تومان', page_text)
-            if price_match:
-                price_str = f"{price_match.group(1)} تومان"
-
-        is_purchasable = bool(in_stock and price_str)
-        desc_meta = soup.find('meta', property='og:description')
-        short_desc = desc_meta['content'] if desc_meta and desc_meta.get('content') else ""
-        real_features = extract_real_product_features(page_text, short_desc)
-
-        return {
-            'title': title,
-            'url': url,
-            'image_url': image_url,
-            'price': price_str or "مشاهده قیمت در صفحه محصول",
-            'in_stock': in_stock,
-            'is_purchasable': is_purchasable,
-            'real_features': real_features
-        }
+            page = await resp.text()
+        text = to_en_digits(BeautifulSoup(page, "html.parser").get_text(" ", strip=True))
+        m = re.search(r"دلار[^\d]{0,120}?(\d{2,3},\d{3})", text)
+        return int(m.group(1).replace(",", "")) if m else None
     except Exception:
         return None
 
-async def refresh_digital_products_catalog(session: aiohttp.ClientSession):
-    collected = []
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+async def _usd_navasan(session):
+    if not NAVASAN_API_KEY:
+        return None
+    try:
+        url = f"http://api.navasan.tech/latest/?api_key={NAVASAN_API_KEY}&item=usd_sell"
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
+            data = await resp.json(content_type=None)
+        return int(float(to_en_digits(data["usd_sell"]["value"]).replace(",", "")))
+    except Exception:
+        return None
 
-    for page_num in range(1, 5):
-        api_url = f"{STORE_BASE_URL}/wp-json/wc/store/v1/products?per_page=100&page={page_num}"
+async def _usd_brsapi(session):
+    if not BRSAPI_KEY:
+        return None
+    try:
+        url = f"https://brsapi.ir/Api/Market/Gold_Currency.php?key={BRSAPI_KEY}"
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
+            data = await resp.json(content_type=None)
+        for item in data.get("currency", []):
+            if str(item.get("symbol", "")).upper() == "USD":
+                v = int(float(to_en_digits(item.get("price", 0)).replace(",", "")))
+                return v // 10 if v > 3_000_000 else v
+    except Exception:
+        return None
+    return None
+
+async def get_usd_toman(session):
+    fetchers = [("tgju.org", _usd_tgju), ("alanchand.com", _usd_alanchand),
+                ("navasan.tech", _usd_navasan), ("brsapi.ir", _usd_brsapi)]
+    results = await asyncio.gather(*(f(session) for _, f in fetchers), return_exceptions=True)
+    got = [(name, v) for (name, _), v in zip(fetchers, results) if _usd_ok(v)]
+    if not got:
+        return None
+    return int(statistics.median(v for _, v in got)), got
+
+def _fa_money(value: int) -> str:
+    return to_fa_digits(f"{value:,}").replace(",", "٬")
+
+def build_usd_post(value: int, sources: list, verse: dict, dt: datetime) -> str:
+    d = format_dates(dt)
+    lines = [
+        "💵 <b>قیمت امروز دلار آمریکا</b> | بازار آزاد",
+        f"📅 <b>{d['weekday']}</b>، {d['jalali']} | {d['gregorian']}",
+        "",
+        f"💰 هر دلار آمریکا: <b>{_fa_money(value)} تومان</b>",
+    ]
+    if len(sources) >= 2:
+        detail = " ، ".join(f"{html.escape(n)}: {_fa_money(v)}" for n, v in sources)
+        lines.append(f"🔎 نرخ گزارش‌شده در منابع: {detail}")
+        lines.append("ℹ️ عدد اعلام‌شده، میانه‌ی نرخ منابع بالاست.")
+    else:
+        lines.append(f"🔎 منبع: {html.escape(sources[0][0])}")
+    lines.append("ℹ️ نرخ‌ها لحظه‌ای‌اند و ممکن است میان صرافی‌ها اندکی تفاوت داشته باشند.")
+    lines += [
+        "",
+        "📜 <b>بیتی از سعدی</b>",
+        f"<blockquote>{html.escape(verse['m1'])}\n{html.escape(verse['m2'])}</blockquote>",
+        f"✍️ سعدی شیرازی | <a href=\"{html.escape(verse['url'])}\">{html.escape(verse['title'])}</a> (گنجور)",
+        f"\n🏷 #قیمت_دلار #دلار #سعدی #شعر_فارسی{CHANNEL_SIGNATURE}",
+    ]
+    return "\n".join(lines)
+
+async def publish_daily_usd_post_if_due(session):
+    now = now_tehran()
+    today = now.strftime("%Y-%m-%d")
+    if not (USD_POST_HOUR <= now.hour < USD_WINDOW_END_HOUR):
+        return
+    if get_metadata("last_usd_post_date") == today:
+        return
+    got = await get_usd_toman(session)
+    if not got:
+        print("⚠️ قیمت دلار از هیچ منبعی دریافت نشد؛ در چرخه‌ی بعد دوباره تلاش می‌شود.")
+        return
+    value, sources = got
+    verse = await fetch_saadi_verse(session)
+    text = build_usd_post(value, sources, verse, now)
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("📜 خواندن شعر کامل در گنجور", url=verse["url"])]])
+    msg = await send_post(session, text, reply_markup=markup, silent=False)
+    set_metadata("last_usd_post_date", today)
+    await pin_post(msg.message_id)
+    print(f"✅ پست دلار منتشر شد: {value:,} تومان")
+
+# ================= ۱۱. فیلم و موسیقی روزانه (ساعت ۱۲) بر اساس روز جهانی =================
+INTERNATIONAL_DAYS = {
+    "01-24": ("International Day of Education", "روز جهانی آموزش"),
+    "02-11": ("International Day of Women and Girls in Science", "روز جهانی زنان و دختران در علم"),
+    "02-13": ("World Radio Day", "روز جهانی رادیو"),
+    "02-20": ("World Day of Social Justice", "روز جهانی عدالت اجتماعی"),
+    "02-21": ("International Mother Language Day", "روز جهانی زبان مادری"),
+    "03-08": ("International Women's Day", "روز جهانی زن"),
+    "03-14": ("Pi Day", "روز جهانی عدد پی"),
+    "03-20": ("International Day of Happiness", "روز جهانی شادی"),
+    "03-21": ("World Poetry Day", "روز جهانی شعر"),
+    "03-22": ("World Water Day", "روز جهانی آب"),
+    "03-27": ("World Theatre Day", "روز جهانی تئاتر"),
+    "04-02": ("World Autism Awareness Day", "روز جهانی آگاهی از اوتیسم"),
+    "04-07": ("World Health Day", "روز جهانی بهداشت"),
+    "04-12": ("International Day of Human Space Flight", "روز جهانی پرواز فضایی انسان"),
+    "04-15": ("World Art Day", "روز جهانی هنر"),
+    "04-22": ("Earth Day", "روز جهانی زمین"),
+    "04-23": ("World Book and Copyright Day", "روز جهانی کتاب و حق مؤلف"),
+    "04-30": ("International Jazz Day", "روز جهانی جاز"),
+    "05-01": ("International Workers' Day", "روز جهانی کارگر"),
+    "05-03": ("World Press Freedom Day", "روز جهانی آزادی مطبوعات"),
+    "05-15": ("International Day of Families", "روز جهانی خانواده"),
+    "05-17": ("World Telecommunication and Information Society Day", "روز جهانی ارتباطات و جامعه‌ی اطلاعاتی"),
+    "05-18": ("International Museum Day", "روز جهانی موزه"),
+    "05-22": ("International Day for Biological Diversity", "روز جهانی تنوع زیستی"),
+    "06-05": ("World Environment Day", "روز جهانی محیط زیست"),
+    "06-08": ("World Oceans Day", "روز جهانی اقیانوس‌ها"),
+    "06-20": ("World Refugee Day", "روز جهانی پناهنده"),
+    "06-21": ("World Music Day", "روز جهانی موسیقی"),
+    "06-30": ("International Asteroid Day", "روز جهانی سیارک‌ها"),
+    "07-11": ("World Population Day", "روز جهانی جمعیت"),
+    "07-18": ("Nelson Mandela International Day", "روز جهانی نلسون ماندلا"),
+    "07-30": ("International Day of Friendship", "روز جهانی دوستی"),
+    "08-09": ("International Day of the World's Indigenous Peoples", "روز جهانی مردمان بومی"),
+    "08-12": ("International Youth Day", "روز جهانی جوانان"),
+    "08-19": ("World Photography Day", "روز جهانی عکاسی"),
+    "09-08": ("International Literacy Day", "روز جهانی سوادآموزی"),
+    "09-15": ("International Day of Democracy", "روز جهانی دموکراسی"),
+    "09-21": ("International Day of Peace", "روز جهانی صلح"),
+    "09-27": ("World Tourism Day", "روز جهانی گردشگری"),
+    "09-29": ("World Heart Day", "روز جهانی قلب"),
+    "10-01": ("International Music Day", "روز جهانی موسیقی"),
+    "10-04": ("World Animal Day", "روز جهانی حیوانات"),
+    "10-05": ("World Teachers' Day", "روز جهانی معلم"),
+    "10-10": ("World Mental Health Day", "روز جهانی سلامت روان"),
+    "10-16": ("World Food Day", "روز جهانی غذا"),
+    "10-24": ("United Nations Day", "روز سازمان ملل"),
+    "11-10": ("World Science Day for Peace and Development", "روز جهانی علم برای صلح و توسعه"),
+    "11-13": ("World Kindness Day", "روز جهانی مهربانی"),
+    "11-14": ("World Diabetes Day", "روز جهانی دیابت"),
+    "11-16": ("International Day for Tolerance", "روز جهانی مدارا"),
+    "11-20": ("World Children's Day", "روز جهانی کودک"),
+    "11-21": ("World Television Day", "روز جهانی تلویزیون"),
+    "12-01": ("World AIDS Day", "روز جهانی مبارزه با ایدز"),
+    "12-03": ("International Day of Persons with Disabilities", "روز جهانی افراد دارای معلولیت"),
+    "12-05": ("International Volunteer Day", "روز جهانی داوطلب"),
+    "12-10": ("Human Rights Day", "روز جهانی حقوق بشر"),
+    "12-11": ("International Mountain Day", "روز جهانی کوهستان"),
+    "12-18": ("International Migrants Day", "روز جهانی مهاجران"),
+    "12-20": ("International Human Solidarity Day", "روز جهانی همبستگی انسانی"),
+}
+
+MUSIC_GENRES = [("rock", "راک"), ("funk", "فانک"), ("soul", "سول"), ("blues", "بلوز"), ("rnb", "آر اند بی"),
+                ("jazz", "جز"), ("hiphop", "هیپ‌هاپ"), ("rap", "رپ"), ("pop", "پاپ"), ("electronic", "الکترونیک")]
+
+class MovieRec(BaseModel):
+    title_en: str
+    title_fa: str = ""
+    year: int
+    director: str = ""
+    genres_persian: str = ""
+    imdb_rating: float = Field(description="IMDb rating; MUST be strictly above 7.0")
+    plot_hook_persian: str = Field(description="2 sentences, spoiler-free")
+    why_today_persian: str = Field(description="1-2 sentences connecting the film to today's occasion")
+
+class MusicRec(BaseModel):
+    artist: str
+    track: str
+    album: str = ""
+    year: int = 0
+    why_today_persian: str = Field(description="1-2 sentences connecting the track to today's occasion")
+
+class DailyRec(BaseModel):
+    occasion_persian: str = ""
+    occasion_english: str = ""
+    occasion_note_persian: str = Field(default="", description="1-2 factual sentences about the occasion")
+    movie: MovieRec
+    music: MusicRec
+
+async def omdb_lookup(session, title: str, year: int):
+    if not OMDB_API_KEY:
+        return None
+    try:
+        url = f"https://www.omdbapi.com/?apikey={OMDB_API_KEY}&t={quote_plus(title)}&y={year}&type=movie"
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
+            data = await resp.json(content_type=None)
+        if data.get("Response") != "True":
+            return None
+        rating = float(data.get("imdbRating", "0"))
+        votes = int(to_en_digits(data.get("imdbVotes", "0")).replace(",", "") or 0)
+        poster = data.get("Poster") if str(data.get("Poster", "")).startswith("http") else None
+        return {"rating": rating, "votes": votes, "id": data.get("imdbID"), "poster": poster}
+    except Exception:
+        return None
+
+def _recent_load() -> dict:
+    try:
+        return json.loads(get_metadata("recent_recs", '{"movies": [], "music": []}'))
+    except Exception:
+        return {"movies": [], "music": []}
+
+async def generate_daily_recommendation(session, dt: datetime):
+    recent = _recent_load()
+    day_key = dt.strftime("%m-%d")
+    occasion = INTERNATIONAL_DAYS.get(day_key)
+    genre_key, genre_fa = MUSIC_GENRES[dt.date().toordinal() % len(MUSIC_GENRES)]
+    rejected = []
+    for _ in range(3):
+        occasion_line = (f"Known international day for this date: {occasion[0]} ({occasion[1]})." if occasion else
+                         "No pre-verified international day for this date. Name one ONLY if you are certain a widely "
+                         "recognised UN/UNESCO-style international day falls on exactly this month-day; otherwise leave "
+                         "occasion fields empty and connect picks to the date/season instead. Never invent an occasion.")
+        prompt = f"""
+You are the culture editor of the Persian Telegram channel @jazebestore. Today is {dt.strftime('%A, %d %B %Y')} (Tehran).
+{occasion_line}
+
+Pick ONE feature film and ONE music track that fit today's occasion/theme.
+MOVIE rules: a real theatrical/feature film (not a series), IMDb rating strictly above 7.0 (prefer well-known titles whose
+rating you are sure about, 7.5+ is safer), at least 20,000 IMDb votes, any country/era. Never invent titles.
+MUSIC rules: a real, existing track by a real artist, genre: {genre_key}. Never invent songs/albums.
+Do NOT pick these (already used or rejected): {json.dumps(recent['movies'][-60:] + recent['music'][-60:] + rejected, ensure_ascii=False)}.
+WRITING rules: all *_persian fields in fluent, natural, standard Persian (not word-for-word translation), correct
+half-spaces (نیم‌فاصله), Persian punctuation (، ؛ ؟ «»), keep film/artist/track names in English. No spoilers.
+"""
+        rec = await ask_ai_json(prompt, DailyRec, temperature=0.6)
+        if not rec:
+            continue
+        m = rec.movie
+        key = m.title_en.strip().lower()
+        if key in [x.lower() for x in recent["movies"]] or f"{rec.music.artist} - {rec.music.track}".lower() in \
+                [x.lower() for x in recent["music"]]:
+            rejected += [m.title_en, f"{rec.music.artist} - {rec.music.track}"]
+            continue
+        info = await omdb_lookup(session, m.title_en, m.year)
+        if OMDB_API_KEY:
+            if not info or info["rating"] <= 7.0 or info["votes"] < 20000:
+                rejected.append(m.title_en)
+                continue
+            m.imdb_rating = info["rating"]
+        elif m.imdb_rating <= 7.0:
+            rejected.append(m.title_en)
+            continue
+        return rec, info, genre_key, genre_fa, occasion
+    return None
+
+def build_daily_rec_post(rec: DailyRec, info, genre_fa: str, occasion, dt: datetime) -> str:
+    d = format_dates(dt)
+    occ_fa = rec.occasion_persian or (occasion[1] if occasion else "")
+    m, mu = rec.movie, rec.music
+    e = html.escape
+    lines = [f"🌍 <b>{e(persian_polish(occ_fa))}</b>" if occ_fa else "🗓 <b>پیشنهاد فرهنگی امروز</b>",
+             f"📅 <b>{d['weekday']}</b>، {d['jalali']} | {d['gregorian']}"]
+    if rec.occasion_note_persian:
+        lines.append(f"<blockquote>{e(persian_polish(rec.occasion_note_persian))}</blockquote>")
+    title_line = f"{e(m.title_fa)} ({e(m.title_en)}، {m.year})" if m.title_fa else f"{e(m.title_en)} ({m.year})"
+    rating_note = (f"⭐ نمره IMDb: <b>{m.imdb_rating}/10</b> (تأییدشده)" if info
+                   else f"⭐ نمره IMDb: حدود <b>{m.imdb_rating}/10</b> (پیش از تماشا بررسی کنید)")
+    lines += ["", "🎬 <b>فیلم پیشنهادی امروز</b>", f"<b>{title_line}</b>"]
+    if m.director or m.genres_persian:
+        lines.append(f"🎞 کارگردان: {e(m.director)} | ژانر: {e(persian_polish(m.genres_persian))}")
+    lines += [rating_note, e(persian_polish(m.plot_hook_persian)),
+              f"💡 <b>چرا امروز؟</b> {e(persian_polish(m.why_today_persian))}",
+              "", f"🎧 <b>موسیقی پیشنهادی امروز | سبک {genre_fa}</b>",
+              f"<b>{e(mu.artist)} — «{e(mu.track)}»</b>"]
+    if mu.album:
+        lines.append(f"💿 آلبوم: {e(mu.album)}" + (f" ({mu.year})" if mu.year else ""))
+    lines += [e(persian_polish(mu.why_today_persian)),
+              f"\n🏷 #پیشنهاد_روز #فیلم #موسیقی #{genre_fa.replace(' ', '_')}{CHANNEL_SIGNATURE}"]
+    return "\n".join(lines)
+
+async def publish_daily_recommendation_if_due(session):
+    now = now_tehran()
+    today = now.strftime("%Y-%m-%d")
+    if not (DAILY_REC_HOUR <= now.hour < DAILY_REC_WINDOW_END_HOUR):
+        return
+    if get_metadata("last_daily_rec_date") == today:
+        return
+    result = await generate_daily_recommendation(session, now)
+    if not result:
+        print("⚠️ تولید پیشنهاد روزانه ناموفق بود؛ چرخه‌ی بعد دوباره تلاش می‌شود.")
+        return
+    rec, info, genre_key, genre_fa, occasion = result
+    text = build_daily_rec_post(rec, info, genre_fa, occasion, now)
+    m, mu = rec.movie, rec.music
+    imdb_url = f"https://www.imdb.com/title/{info['id']}/" if info and info.get("id") else \
+        f"https://www.imdb.com/find/?q={quote_plus(m.title_en + ' ' + str(m.year))}"
+    music_q = quote_plus(f"{mu.artist} {mu.track}")
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎬 صفحه‌ی فیلم در IMDb", url=imdb_url)],
+        [InlineKeyboardButton("▶️ شنیدن موسیقی در YouTube", url=f"https://www.youtube.com/results?search_query={music_q}")],
+        [InlineKeyboardButton("🎧 جستجو در Spotify", url=f"https://open.spotify.com/search/{music_q}")],
+    ])
+    msg = await send_post(session, text, image_url=(info or {}).get("poster"), reply_markup=markup,
+                          filename="daily_rec.jpg")
+    set_metadata("last_daily_rec_date", today)
+    recent = _recent_load()
+    recent["movies"] = (recent["movies"] + [m.title_en])[-150:]
+    recent["music"] = (recent["music"] + [f"{mu.artist} - {mu.track}"])[-150:]
+    set_metadata("recent_recs", json.dumps(recent, ensure_ascii=False))
+    await pin_post(msg.message_id)
+    print(f"✅ پیشنهاد روزانه منتشر شد: {m.title_en} | {mu.artist} - {mu.track}")
+
+async def run_daily_jobs(session):
+    for job in (unpin_expired_pins, publish_daily_usd_post_if_due, publish_daily_recommendation_if_due):
         try:
-            async with session.get(api_url, timeout=15, headers=headers) as resp:
+            await job(session)
+        except Exception as e:
+            print(f"⚠️ خطا در کار روزانه {job.__name__}: {e}")
+
+# ================= ۱۲. تکمیل خبر با متن کامل مقاله + ویدیو + میم کاربران =================
+_NOISE = re.compile(r"cookie|subscribe|newsletter|sign up|all rights reserved|advertisement", re.I)
+
+def _youtube_watch_url(url: str) -> str:
+    m = re.search(r"youtube\.com/embed/([\w-]{6,})", url)
+    return f"https://www.youtube.com/watch?v={m.group(1)}" if m else url
+
+async def fetch_article_details(session, url: str):
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
+            if resp.status != 200 or "html" not in resp.headers.get("Content-Type", "").lower():
+                return "", ""
+            page = await resp.text(errors="ignore")
+        soup = BeautifulSoup(page, "html.parser")
+        video = ""
+        for prop in ("og:video:url", "og:video", "og:video:secure_url"):
+            tag = soup.find("meta", property=prop)
+            if tag and tag.get("content", "").startswith("http"):
+                video = tag["content"]
+                break
+        if not video:
+            frame = soup.find("iframe", src=re.compile(r"youtube\.com/embed|youtu\.be|player\.vimeo"))
+            if frame:
+                video = frame.get("src", "")
+                if video.startswith("//"):
+                    video = "https:" + video
+        for tag in soup(["script", "style", "nav", "aside", "footer", "form", "header", "noscript"]):
+            tag.decompose()
+        container = soup.find("article") or soup.find("main") or soup
+        paras = [p.get_text(" ", strip=True) for p in container.find_all("p")]
+        paras = [p for p in paras if len(p) > 50 and not _NOISE.search(p)]
+        body = " ".join(paras)[:ARTICLE_MAX_CHARS * 2]
+        return body, _youtube_watch_url(video) if video else ""
+    except Exception:
+        return "", ""
+
+def pick_video_url(orig_item: dict) -> str:
+    if orig_item.get("video_url"):
+        return orig_item["video_url"]
+    link = orig_item.get("link", "") or ""
+    if re.search(r"youtube\.com/watch|youtu\.be/|twitch\.tv|vimeo\.com", link):
+        return link
+    return ""
+
+async def enrich_selected_items(session, selected_items, batch_map):
+    try:
+        sem = asyncio.Semaphore(5)
+
+        async def one(sel):
+            orig = batch_map.get(sel.selected_id)
+            if not orig:
+                return sel.selected_id, "", ""
+            async with sem:
+                body, video = await fetch_article_details(session, orig["link"])
+            return sel.selected_id, body, video
+
+        fetched = await asyncio.gather(*(one(s) for s in selected_items), return_exceptions=True)
+        details = {}
+        for r in fetched:
+            if isinstance(r, tuple):
+                details[r[0]] = (r[1], r[2])
+                orig = batch_map.get(r[0])
+                if orig is not None and r[2] and not orig.get("video_url"):
+                    orig["video_url"] = r[2]
+
+        work = [(s, details[s.selected_id][0]) for s in selected_items
+                if len(details.get(s.selected_id, ("", ""))[0]) >= 400]
+        for i in range(0, len(work), ENRICH_CHUNK):
+            chunk = work[i:i + ENRICH_CHUNK]
+            payload = [{
+                "selected_id": s.selected_id,
+                "category_id": s.category_id,
+                "verification_status": s.verification_status,
+                "current_headline_persian": s.headline_persian,
+                "rss_text": batch_map[s.selected_id]["text"],
+                "full_article_excerpt": body[:ARTICLE_MAX_CHARS],
+            } for s, body in chunk]
+            prompt = f"""
+You are the Chief Editor of '@jazebestore'. For each item below, rewrite the Persian news copy to be COMPLETE and PRECISE
+using ONLY facts present in `rss_text` and `full_article_excerpt` (never invent facts, quotes, prices or dates).
+Rules:
+- Avoid generalities: include every concrete name, number, date, price, platform, version, and who-said-what.
+- summary_persian: 4-6 short sentences; wrap 1-4 key facts in <b>...</b>. key_points_persian: 3-5 factual bullets.
+- background_persian: 1-2 sentences of context that helps the reader (only if supported by the text), else "".
+- Write natural, standard Persian (not word-for-word translation): correct half-spaces (نیم‌فاصله), Persian punctuation
+  (، ؛ ؟ «»), established Persian terms where common, proper nouns/game/product names kept in English.
+- Return one object per input item, same selected_id, and keep every other field consistent with the input item
+  (category_id, verification_status, confidence_score, is_breaking, series_name, hashtags, topic_fingerprint, related_game, hype_score).
+Items:
+{json.dumps(payload, ensure_ascii=False)}
+"""
+            result = await generate_news_with_fallback(prompt)
+            if not result:
+                continue
+            by_id = {e.selected_id: e for e in result.selected_news}
+            for s, _ in chunk:
+                e = by_id.get(s.selected_id)
+                if not e or len((e.summary_persian or "").strip()) < 60:
+                    continue
+                for field in ("headline_persian", "summary_persian", "background_persian",
+                              "image_alt_persian", "av_transcript_summary_persian"):
+                    val = getattr(e, field, "")
+                    if val and val.strip():
+                        setattr(s, field, val)
+                if e.key_points_persian and len(e.key_points_persian) >= 2:
+                    s.key_points_persian = e.key_points_persian
+    except Exception as err:
+        print(f"⚠️ مرحله‌ی تکمیل خبر نادیده گرفته شد: {err}")
+    return selected_items
+
+async def send_video_reply(video_url: str, reply_to: int, silent: bool = False):
+    try:
+        await bot.send_message(
+            chat_id=TARGET_CHANNEL, parse_mode="HTML", disable_notification=silent,
+            text=f"🎬 <b>ویدیوی مرتبط با این خبر</b>\n{html.escape(video_url)}",
+            disable_web_page_preview=False, **_reply_kwargs(reply_to))
+    except Exception as e:
+        print(f"⚠️ ارسال ویدیو ناموفق: {e}")
+
+def remember_news_message(item_id: int, message_id: int):
+    set_metadata(f"news_msg_{item_id}", str(message_id))
+
+class MemePick(BaseModel):
+    chosen_index: int = Field(description="Index of the best candidate that is genuinely a joke about this topic, or -1")
+    joke_persian: str = Field(default="", description="Natural Persian rendition of the joke's meaning, max 220 chars")
+    context_persian: str = Field(default="", description="One short Persian sentence explaining the joke if needed")
+    is_safe_and_funny: bool = False
+
+def _meme_seen() -> list:
+    try:
+        return json.loads(get_metadata("meme_seen", "[]"))
+    except Exception:
+        return []
+
+async def _reddit_candidates(session, query: str) -> list:
+    seen = set(_meme_seen())
+    out = []
+    for period in ("day", "week"):
+        url = f"https://www.reddit.com/search.rss?q={quote_plus(query)}&sort=top&t={period}&limit=25"
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15), headers=REDDIT_UA) as resp:
                 if resp.status != 200:
-                    break
-                data = await resp.json()
-                if not isinstance(data, list) or not data:
-                    break
-                for p in data:
-                    title = clean_raw_text(p.get('name', ''))
-                    permalink = p.get('permalink', '')
-                    if not title or not permalink or not is_digital_game_or_plus_product(title, permalink):
-                        continue
-                    in_stock = bool(p.get('is_in_stock', False))
-                    is_purchasable = bool(p.get('is_purchasable', True) and in_stock)
-                    prices = p.get('prices', {})
-                    raw_price = str(prices.get('price', ''))
-                    minor_unit = int(prices.get('currency_minor_unit', 0))
-                    currency_code = str(prices.get('currency_code', '')).upper()
-                    price_str = ""
-                    if raw_price.isdigit():
-                        val = int(raw_price) // (10 ** minor_unit)
-                        if currency_code in ['IRR', 'RIAL']:
-                            val = val // 10
-                        if val > 0:
-                            price_str = f"{val:,} تومان"
-                    images = p.get('images', [])
-                    img_url = images[0].get('src') if images else None
-                    short_desc = clean_raw_text(p.get('short_description', ''))
-                    full_desc = clean_raw_text(p.get('description', ''))
-                    real_features = extract_real_product_features(full_desc, short_desc)
-                    collected.append({
-                        'title': title,
-                        'url': permalink,
-                        'image_url': img_url,
-                        'price': price_str or "مشاهده قیمت در صفحه محصول",
-                        'in_stock': in_stock,
-                        'is_purchasable': is_purchasable and bool(price_str),
-                        'real_features': real_features
-                    })
+                    continue
+                xml = await resp.text()
         except Exception:
+            continue
+        feed = await asyncio.to_thread(feedparser.parse, xml)
+        for e in feed.entries:
+            tags = getattr(e, "tags", []) or []
+            sub = str(tags[0].get("term", "")).lower() if tags else ""
+            link = getattr(e, "link", "")
+            if sub not in MEME_SUBREDDITS or not link or link in seen:
+                continue
+            body = e.content[0].value if getattr(e, "content", None) else ""
+            m = re.search(r'https://(?:i|preview)\.redd\.it/[^"\']+?\.(?:jpe?g|png|webp)[^"\']*', body)
+            img = html.unescape(m.group(0)) if m else None
+            if not img and getattr(e, "media_thumbnail", None):
+                img = e.media_thumbnail[0].get("url")
+            out.append({"index": len(out), "subreddit": sub, "title": (e.title or "")[:200], "link": link, "image": img})
+            if len(out) >= 5:
+                return out
+        if out:
             break
+    return out
 
-    if collected:
-        save_digital_products_to_db(collected)
-        print(f"✅ کاتالوگ کامل ({len(collected)} محصول دیجیتالی) از طریق API سایت همگام‌سازی شد.")
-        return
+async def _try_meme(session, query: str, topic_en: str, reply_to=None) -> bool:
+    try:
+        cands = await _reddit_candidates(session, query)
+        if not cands:
+            return False
+        prompt = f"""
+Topic of our news post: {topic_en}
+Candidate Reddit posts (real user posts; titles only):
+{json.dumps([{k: c[k] for k in ('index', 'subreddit', 'title')} for c in cands], ensure_ascii=False)}
+Choose the ONE candidate whose title is a genuine, funny community joke/meme directly about this topic (chosen_index = -1 if none).
+Render the joke's meaning in natural, witty, standard Persian (not word-for-word), correct half-spaces. Do not add facts that
+are not in the title. Reject anything insulting, sexual, hateful, religious or political (is_safe_and_funny=false).
+"""
+        pick = await ask_ai_json(prompt, MemePick, temperature=0.5)
+        if pick is None or pick.chosen_index < 0 or pick.chosen_index >= len(cands) or \
+                not pick.is_safe_and_funny or len(pick.joke_persian.strip()) < 8:
+            return False
+        c = cands[pick.chosen_index]
+        e = html.escape
+        lines = ["😄 <b>شوخی کاربران فضای مجازی</b>",
+                 f"<blockquote>{e(persian_polish(pick.joke_persian))}</blockquote>"]
+        if pick.context_persian.strip():
+            lines.append(f"💬 {e(persian_polish(pick.context_persian))}")
+        lines.append(f"📎 برگرفته از پست کاربران Reddit (r/{e(c['subreddit'])}): «{e(c['title'][:120])}»")
+        lines.append(f"\n🏷 #شوخی_کاربران #میم #فان{CHANNEL_SIGNATURE}")
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 دیدن پست اصلی در Reddit", url=c["link"])]])
+        await send_post(session, "\n".join(lines), image_url=c["image"], reply_markup=markup,
+                        reply_to=reply_to, filename=f"meme_{c['index']}.jpg")
+        seen = (_meme_seen() + [c["link"]])[-300:]
+        set_metadata("meme_seen", json.dumps(seen))
+        set_metadata("last_meme_ts", str(now_tehran().timestamp()))
+        return True
+    except Exception as err:
+        print(f"⚠️ ارسال شوخی ناموفق: {err}")
+        return False
 
-    all_urls = await discover_all_product_urls_from_site(session)
-    if not all_urls:
-        print("⚠️ لینکی از نقشه سایت دریافت نشد.")
-        return
+def _meme_query_for(sel) -> str:
+    if getattr(sel, "related_game", ""):
+        return sel.related_game
+    names = re.findall(r"[A-Z][\w:+-]+", getattr(sel, "topic_fingerprint", "") or "")
+    return " ".join(names[:4])
 
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT url FROM digital_products_cache WHERE updated_at >= datetime('now', '-6 hours')")
-    recently_updated = {r[0] for r in c.fetchall()}
-    conn.close()
+async def post_meme_reply_for_news(session, sel, news_msg_id: int) -> bool:
+    query = _meme_query_for(sel)
+    if not query:
+        return False
+    return await _try_meme(session, query, sel.topic_fingerprint or query, reply_to=news_msg_id)
 
-    priority_urls = [u for u in all_urls if u not in recently_updated]
-    if len(priority_urls) < 100:
-        remaining = [u for u in all_urls if u in recently_updated]
-        priority_urls.extend(remaining[:100 - len(priority_urls)])
+async def publish_trending_meme(session):
+    try:
+        last = float(get_metadata("last_meme_ts", "0") or 0)
+        if now_tehran().timestamp() - last < MEME_STANDALONE_GAP_MIN * 60:
+            return
+        if 0 <= now_tehran().hour < 8:
+            return
+        for tr in detect_24h_trends(top_n=3):
+            entity = tr["entity"]
+            reply_to = None
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("""SELECT id FROM news_items WHERE status='published' AND lower(related_entity)=?
+                         AND published_at >= datetime('now','-24 hours') ORDER BY id DESC LIMIT 1""", (entity,))
+            row = c.fetchone()
+            conn.close()
+            if row:
+                mid = get_metadata(f"news_msg_{row[0]}", "")
+                reply_to = int(mid) if mid.isdigit() else None
+            if await _try_meme(session, entity, entity, reply_to=reply_to):
+                return
+    except Exception as err:
+        print(f"⚠️ خطا در شوخی مستقل: {err}")
 
-    batch_to_scrape = priority_urls[:120]
-    sem = asyncio.Semaphore(10)
-
-    async def fetch_with_sem(u):
-        async with sem:
-            return await scrape_single_digital_product(session, u)
-
-    results = await asyncio.gather(*(fetch_with_sem(u) for u in batch_to_scrape))
-    valid_digital = [r for r in results if r is not None]
-    if valid_digital:
-        save_digital_products_to_db(valid_digital)
-        total_available = len(get_all_available_digital_products())
-        print(f"✅ تعداد {len(valid_digital)} صفحه محصول بررسی شد. مجموع محصولات دیجیتالی موجود در کش: {total_available}")
-
-# ================= ۹. سیستم پیشنهاد محصول مرتبط با هر خبر (با Alias Mapping) =================
-def resolve_canonical_entity(text: str) -> str:
-    if not text:
-        return ""
-    low = text.strip().lower()
-    for canonical_key, data in PRODUCT_ALIAS_MAP.items():
-        if canonical_key in low:
-            return canonical_key
-        for trig in data["triggers"]:
-            if trig.lower() in low:
-                return canonical_key
-    return low
-
-def find_matching_store_product_for_news(
-    related_game: str,
-    headline: str = "",
-    summary: str = "",
-    is_new_release: bool = False
-) -> tuple[dict | None, str]:
-    available_products = get_all_available_digital_products()
-    if not available_products:
-        return None, ""
-
-    combined_news_context = f"{related_game} {headline} {summary}".lower()
-    canonical_key = resolve_canonical_entity(related_game) or resolve_canonical_entity(combined_news_context)
-
-    if canonical_key in PRODUCT_ALIAS_MAP:
-        rule = PRODUCT_ALIAS_MAP[canonical_key]
-        candidates = []
-        for prod in available_products:
-            p_text = f"{prod['title']} {unquote(prod['url'])}".lower()
-            if any(kw.lower() in p_text for kw in rule["product_keywords"]):
-                candidates.append(prod)
-        if candidates:
-            if is_new_release:
-                preorders = [c for c in candidates if c.get('real_features', {}).get('is_preorder')]
-                if preorders:
-                    return preorders[0], f"🛒 پیش‌خرید و مشاهده {preorders[0]['title'][:30]}"
-            return candidates[0], rule["button_label"]
-
-    if related_game and len(related_game.strip()) >= 3:
-        rg_clean = related_game.strip().lower()
-        rg_tokens = [t for t in re.split(r'\W+', rg_clean) if len(t) > 2]
-        for prod in available_products:
-            p_text = f"{prod['title']} {unquote(prod['url'])}".lower()
-            if rg_clean in p_text or (len(rg_tokens) >= 2 and all(t in p_text for t in rg_tokens)):
-                if is_new_release and prod.get('real_features', {}).get('is_preorder'):
-                    return prod, f"🛒 پیش‌خرید {prod['title'][:32]}"
-                return prod, f"🎮 مشاهده و خرید {prod['title'][:32]}"
-
-    return None, ""
-
-def calculate_product_hype_weight(product: dict, decayed_hype_map: dict[str, float], trends_24h: list[dict]) -> float:
-    base_weight = 1.0
-    p_text = f"{product['title']} {unquote(product['url'])}".lower()
-
-    if "پلاس" in p_text or "plus" in p_text:
-        base_weight += 2.0
-
-    for hyped_entity, decayed_score in decayed_hype_map.items():
-        canonical = resolve_canonical_entity(hyped_entity)
-        if canonical in PRODUCT_ALIAS_MAP:
-            kws = PRODUCT_ALIAS_MAP[canonical]["product_keywords"]
-            if any(k.lower() in p_text for k in kws):
-                base_weight += (decayed_score * 2.5)
-        elif len(hyped_entity) >= 3 and hyped_entity in p_text:
-            base_weight += (decayed_score * 2.5)
-
-    for tr in trends_24h:
-        ent = tr["entity"]
-        if len(ent) >= 3 and ent in p_text:
-            base_weight += 4.0
-
-    return round(base_weight, 2)
-
-def was_product_recently_posted(product_url: str, hours: int = 12) -> bool:
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("DELETE FROM posted_products WHERE posted_at < datetime('now', ?)", (f'-{hours} hours',))
-    conn.commit()
-    c.execute("SELECT 1 FROM posted_products WHERE product_url = ?", (product_url,))
-    exists = c.fetchone() is not None
-    conn.close()
-    return exists
-
-def mark_product_posted(product_url: str):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO posted_products (product_url, posted_at) VALUES (?, CURRENT_TIMESTAMP)", (product_url,))
-    conn.commit()
-    conn.close()
-
-async def publish_weighted_digital_products(session: aiohttp.ClientSession):
-    """انتشار مستقل محصول در کانال طبق درخواست شما غیرفعال است."""
-    return
-
-# ================= ۱۰. جمع‌آوری هم‌زمان فیدهای RSS با یک Session مشترک =================
+# ================= ۱۳. جمع‌آوری هم‌زمان فیدهای RSS =================
 async def fetch_single_feed(session: aiohttp.ClientSession, sem: asyncio.Semaphore, category: str, url: str) -> list[dict]:
     async with sem:
         try:
-            async with session.get(url, timeout=12, headers={'User-Agent': 'Mozilla/5.0'}) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=12), headers={'User-Agent': 'Mozilla/5.0'}) as resp:
                 if resp.status != 200:
                     return []
                 xml_data = await resp.text()
@@ -1308,77 +1675,63 @@ async def fetch_rss_sources(session: aiohttp.ClientSession):
     if new_count > 0:
         await run_semantic_clustering_and_deduplication()
 
-# ================= ۱۱. پردازش، قالب‌بندی دسترس‌پذیر و انتشار اخبار (عادی و فوری) =================
-def format_accessible_news_post(sel: SelectedNewsItem, orig_item: dict, main_cat_hashtag: str) -> str:
-    lines = []
+# ================= ۱۴. قالب غنی و دسترس‌پذیر خبر و انتشار =================
+_CAT_EMOJI = {"gaming": "🎮", "technology": "💻", "hardware": "⚡", "crypto": "🪙", "film_tv": "🍿",
+              "internet_culture": "🌐", "fun_meme": "😄", "music": "🎵", "general_news": "📰"}
+_VER_ICON = {"خبر رسمی": "✅", "گزارش رسانه معتبر": "📰", "شایعه و لیک": "🕵️", "خبر تأییدنشده": "⚠️"}
 
+def format_rich_news_post(sel: SelectedNewsItem, orig_item: dict, main_cat_hashtag: str) -> str:
+    lines = []
     if sel.is_breaking:
         lines.append("🚨 <b>خبر فوری | پوشش ویژه</b>")
     if sel.series_name and sel.series_name in SERIALIZED_SERIES_HEADERS:
         lines.append(f"<b>{SERIALIZED_SERIES_HEADERS[sel.series_name]}</b>")
+    lines.append(f"{_CAT_EMOJI.get(sel.category_id, '📰')} <b>{sanitize_telegram_html(sel.headline_persian)}</b>")
 
-    cat_emoji_map = {
-        "gaming": "🎮",
-        "technology": "💻",
-        "hardware": "⚡",
-        "crypto": "🪙",
-        "film_tv": "🍿",
-        "internet_culture": "🌐",
-        "fun_meme": "😄",
-        "music": "🎵",
-        "general_news": "📰"
-    }
-    lead_emoji = cat_emoji_map.get(sel.category_id, "📰")
-    safe_headline = sanitize_telegram_html(sel.headline_persian)
-    lines.append(f"{lead_emoji} <b>{safe_headline}</b>")
-
-    cat_persian = CATEGORY_PERSIAN_NAMES.get(sel.category_id, "اخبار")
-    valid_statuses = ["خبر رسمی", "گزارش رسانه معتبر", "شایعه و لیک", "خبر تأییدنشده"]
-    ver_status = sel.verification_status if sel.verification_status in valid_statuses else "گزارش رسانه معتبر"
-    conf_score = max(40, min(100, int(sel.confidence_score or 85)))
-    src_count = max(1, int(orig_item.get('source_count', 1)))
-
-    lines.append(f"دسته‌بندی: {cat_persian} | وضعیت: <b>{ver_status}</b>")
-    lines.append(f"درجه اطمینان: {conf_score}٪ | تعداد منابع: {src_count} منبع")
+    cat_fa = CATEGORY_PERSIAN_NAMES.get(sel.category_id, "اخبار")
+    valid = list(_VER_ICON)
+    ver = sel.verification_status if sel.verification_status in valid else "گزارش رسانه معتبر"
+    conf = max(40, min(100, int(sel.confidence_score or 85)))
+    src = max(1, int(orig_item.get("source_count", 1)))
+    lines.append(f"🗂 دسته‌بندی: {cat_fa} | {_VER_ICON[ver]} وضعیت: <b>{ver}</b>")
+    lines.append(f"📊 درجه اطمینان: {to_fa_digits(conf)}٪ | 🔗 تعداد منابع: {to_fa_digits(src)} منبع")
     lines.append("")
+    summary = re.sub(r"\s*\n\s*", " ", sel.summary_persian or "")
+    lines.append(f"<blockquote>{sanitize_telegram_html(summary)}</blockquote>")
 
-    safe_summary = sanitize_telegram_html(sel.summary_persian)
-    lines.append(safe_summary)
+    background = getattr(sel, "background_persian", "") or ""
+    if background.strip():
+        lines.append("")
+        background = re.sub(r"\s*\n\s*", " ", background)
+        lines.append(f"📌 <b>پیش‌زمینه:</b> {sanitize_telegram_html(background)}")
 
     if sel.key_points_persian:
         lines.append("")
         lines.append("<b>مهم‌ترین نکات:</b>")
-        for pt in sel.key_points_persian[:3]:
-            clean_pt = sanitize_telegram_html(pt.lstrip("•-*▫️🔹 "))
-            if clean_pt:
-                lines.append(f"• {clean_pt}")
+        for pt in sel.key_points_persian[:5]:
+            clean = sanitize_telegram_html(pt.lstrip("•-*▫️🔹 "))
+            if clean:
+                lines.append(f"🔹 {clean}")
 
-    if orig_item.get('has_video_or_audio') or sel.av_transcript_summary_persian.strip():
-        av_text = sanitize_telegram_html(
-            sel.av_transcript_summary_persian.strip()
-            or "تمامی اطلاعات کلیدی این ویدئو/فایل صوتی به صورت متنی در نکات بالا درج شده است."
-        )
+    if orig_item.get("has_video_or_audio") or (sel.av_transcript_summary_persian or "").strip():
+        av = sanitize_telegram_html((sel.av_transcript_summary_persian or "").strip() or
+                                    "تمامی اطلاعات کلیدی این ویدئو/فایل صوتی به صورت متنی در نکات بالا درج شده است.")
         lines.append("")
-        lines.append(f"📝 <b>متن و خلاصه محتوای ویدئویی/صوتی (ویژه ناشنوایان):</b> {av_text}")
+        lines.append(f"📝 <b>متن و خلاصه محتوای ویدئویی/صوتی (ویژه ناشنوایان):</b> {av}")
 
-    if orig_item.get('image_url'):
-        alt_text = sanitize_telegram_html(
-            sel.image_alt_persian.strip()
-            or f"تصویر مرتبط با خبر «{sel.headline_persian}»"
-        )
+    if orig_item.get("image_url"):
+        alt = sanitize_telegram_html((sel.image_alt_persian or "").strip() or f"تصویر مرتبط با خبر «{sel.headline_persian}»")
         lines.append("")
-        lines.append(f"🖼 <b>توضیح تصویر:</b> {alt_text}")
+        lines.append(f"🖼 <b>توضیح تصویر:</b> {alt}")
 
-    extra_tags = []
+    extra = []
     for tag in sel.topic_hashtags:
-        clean_tag = re.sub(r'[^\w#]', '_', tag.strip())
+        clean_tag = re.sub(r"[^\w#]", "_", tag.strip())
         if not clean_tag.startswith("#"):
             clean_tag = "#" + clean_tag
         if clean_tag != main_cat_hashtag and len(clean_tag) > 2:
-            extra_tags.append(clean_tag)
-
-    hashtags_line = " ".join([main_cat_hashtag] + extra_tags[:3])
-    lines.append(f"\n🏷 {hashtags_line}{CHANNEL_SIGNATURE}")
+            extra.append(clean_tag)
+    lines.append(f"\n🏷 {' '.join([main_cat_hashtag] + extra[:3])}{CHANNEL_SIGNATURE}")
     return "\n".join(lines)
 
 async def process_and_publish_batch(
@@ -1485,14 +1838,8 @@ async def process_and_publish_batch(
        - `key_points_persian`: 3 to 5 structured, factual Persian bullets; `background_persian`: 1-2 sentences of context only if supported by the text.
        - `image_alt_persian`: If `has_image` is true, write a 1-sentence descriptive Persian explanation of what the image/artwork represents for blind screen-reader users.
        - `av_transcript_summary_persian`: If `has_video_or_audio` is true (or news is about a trailer/podcast/showcase), write a concise Persian text transcript/summary of the video/audio content for deaf users.
-    5. PRODUCT & HYPE LINKING (`related_game` & `is_new_game_release`):
-       - Keep proper nouns in English.
-       - If the news is about PlayStation Plus, set `related_game` = "PlayStation Plus".
-       - If about GTA VI, set `related_game` = "GTA VI".
-       - If about PS5 Pro or PlayStation 5 hardware, set `related_game` = "PS5 Pro".
-       - If about EA SPORTS FC 27 / FC 26, set `related_game` = "EA SPORTS FC 27".
-       - For any other specific video game, put its exact canonical English title in `related_game`.
-       - Set `is_new_game_release` = true if the news announces a new game release or pre-order.
+    5. TOPIC TRACKING (`related_game` & `is_new_game_release`):
+       - Keep proper nouns in English. Put the exact canonical English title of the related game, service, or console in `related_game` (e.g., "GTA VI", "PlayStation Plus", "PS5 Pro", "EA SPORTS FC 27"), otherwise "".
     6. VIDEO NEWS: Prefer candidates with `has_video_or_audio` = true (trailers, showcases, announcements) whenever they are newsworthy.
     7. PERSIAN STYLE: Use ی/ک فارسی (not ي/ك), keep game/product/company names in English, use established Persian terms where common, and avoid vague or generic wording.
     """
@@ -1513,7 +1860,7 @@ async def process_and_publish_batch(
     if not breaking_only and non_selected_ids:
         update_news_status(non_selected_ids, 'rejected')
 
-    selected_items = await extras.enrich_selected_items(session, selected_items, batch_map)
+    selected_items = await enrich_selected_items(session, selected_items, batch_map)
 
     tehran_hour = datetime.now(ZoneInfo("Asia/Tehran")).hour
     silent_mode = (0 <= tehran_hour < 8) and not breaking_only
@@ -1524,13 +1871,13 @@ async def process_and_publish_batch(
         if not orig_item:
             continue
 
-        extras.polish_selected(sel)
+        polish_selected(sel)
         cat_id = sel.category_id if sel.category_id in CATEGORY_HASHTAGS else orig_item.get('category', 'general_news')
         main_cat_hashtag = CATEGORY_HASHTAGS.get(cat_id, "#اخبار")
-        final_caption = extras.format_rich_news_post(sel, orig_item, main_cat_hashtag)
+        final_caption = format_rich_news_post(sel, orig_item, main_cat_hashtag)
 
         news_link = orig_item.get('link', STORE_BASE_URL)
-        video_url = extras.pick_video_url(orig_item)
+        video_url = pick_video_url(orig_item)
         keyboard = [
             [InlineKeyboardButton("❤️ پسندیدن این خبر (0)", callback_data=f"like_{orig_item['id']}")],
             [InlineKeyboardButton("🔗 مطالعه گزارش کامل در منبع اصلی", url=news_link)]
@@ -1541,7 +1888,7 @@ async def process_and_publish_batch(
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         try:
-            news_msg = await extras.send_post(
+            news_msg = await send_post(
                 session, final_caption, image_url=orig_item.get('image_url'),
                 reply_markup=reply_markup, silent=silent_mode, filename=f"img_{orig_item['id']}.jpg"
             )
@@ -1553,15 +1900,15 @@ async def process_and_publish_batch(
                 related_entity=sel.related_game,
                 ai_payload=sel.model_dump()
             )
-            extras.remember_news_message(orig_item['id'], news_msg.message_id)
+            remember_news_message(orig_item['id'], news_msg.message_id)
             if sel.related_game:
                 record_hype_event(sel.related_game, cat_id, float(sel.hype_score))
 
             if video_url:
-                await extras.send_video_reply(video_url, news_msg.message_id, silent_mode)
-            if (not silent_mode and memes_posted < extras.MEME_MAX_PER_CYCLE
-                    and (sel.hype_score >= extras.MEME_MIN_HYPE or cat_id == "fun_meme")):
-                if await extras.post_meme_reply_for_news(session, sel, news_msg.message_id):
+                await send_video_reply(video_url, news_msg.message_id, silent_mode)
+            if (not silent_mode and memes_posted < MEME_MAX_PER_CYCLE
+                    and (sel.hype_score >= MEME_MIN_HYPE or cat_id == "fun_meme")):
+                if await post_meme_reply_for_news(session, sel, news_msg.message_id):
                     memes_posted += 1
 
             await asyncio.sleep(4)
@@ -1570,10 +1917,9 @@ async def process_and_publish_batch(
             print(f"⚠️ خطا در ارسال خبر #{orig_item['id']} به تلگرام: {send_err}")
             update_news_status([orig_item['id']], 'failed', increment_retry=True)
 
-# ================= ۱۲. گزارش خلاصه روزانه (Daily Digest ساعت ۰۰:۰۰ به وقت تهران) =================
+# ================= ۱۵. گزارش خلاصه روزانه (Daily Digest ساعت ۰۰:۰۰ به وقت تهران) =================
 async def publish_daily_digest_if_due():
-    tehran_tz = ZoneInfo("Asia/Tehran")
-    now_tehran = datetime.now(tehran_tz)
+    now_tehran = now_tehran()
     today_str = now_tehran.strftime("%Y-%m-%d")
 
     if now_tehran.hour != 0 or now_tehran.minute > 20:
@@ -1656,7 +2002,7 @@ async def publish_daily_digest_if_due():
     except Exception as e:
         print(f"⚠️ خطا در ارسال Daily Digest: {e}")
 
-# ================= ۱۳. مدیریت دکمه لایک پست‌ها (با حفظ ساختار دسترس‌پذیر) =================
+# ================= ۱۶. مدیریت دکمه لایک پست‌ها =================
 async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
@@ -1680,7 +2026,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             print(f"Error updating like button UI: {e}")
 
-# ================= ۱۴. حلقه اصلی ۲۴ ساعته (پایش ۳ دقیقه‌ای اخبار فوری + چرخه ۳۰ دقیقه‌ای) =================
+# ================= ۱۷. حلقه اصلی ۲۴ ساعته =================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     err_msg = str(context.error)
     if "Conflict" in err_msg:
@@ -1690,17 +2036,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def background_news_loop(app_bot):
     init_db()
-    extras.configure(
-        bot=bot, channel=TARGET_CHANNEL, signature=CHANNEL_SIGNATURE, db_path=DB_PATH,
-        get_metadata=get_metadata, set_metadata=set_metadata,
-        sanitize=sanitize_telegram_html, download_image=download_image_from_url,
-        generate_batch=generate_news_with_fallback, detect_24h_trends=detect_24h_trends,
-        category_names=CATEGORY_PERSIAN_NAMES, series_headers=SERIALIZED_SERIES_HEADERS,
-        gemini_keys=GEMINI_API_KEYS, gemini_models=GEMINI_MODELS,
-        groq_keys=GROQ_API_KEYS, openrouter_keys=OPENROUTER_API_KEYS,
-    )
-    print("🚀 24/7 Accessible News, Breaking Queue, Trend Engine & Extras Bot is running...")
-    tehran_tz = ZoneInfo("Asia/Tehran")
+    print("🚀 24/7 Accessible News, Breaking Queue, Daily USD/Recs & Trend Bot is running...")
 
     await asyncio.sleep(15)
 
@@ -1709,31 +2045,24 @@ async def background_news_loop(app_bot):
     while True:
         try:
             now_ts = datetime.now(timezone.utc).timestamp()
-            now_tehran = datetime.now(tehran_tz)
+            tehran_now = now_tehran()
 
             connector = aiohttp.TCPConnector(limit=25, ssl=False)
             async with aiohttp.ClientSession(connector=connector) as shared_session:
-                # ۱. بررسی و انتشار گزارش روزانه (Daily Digest) در ساعت ۰۰:۰۰ تهران
                 await publish_daily_digest_if_due()
-
-                # ۲. اجرای کارهای روزانه افزونه (برداشتن پین‌های قبلی، قیمت دلار ساعت ۱۱ + شعر سعدی، فیلم و موسیقی روزانه ساعت ۱۲)
-                await extras.run_daily_jobs(shared_session)
-
-                # ۳. دریافت فیدهای RSS و خوشه‌بندی معنایی (Semantic Deduplication)
+                await run_daily_jobs(shared_session)
                 await fetch_rss_sources(shared_session)
 
-                # ۴. آیا زمان چرخه کامل ۳۰ دقیقه‌ای (۱۸۰۰ ثانیه) رسیده است؟
                 if (now_ts - last_regular_cycle_ts) >= REGULAR_CYCLE_SECONDS:
-                    print(f"\n--- [چرخه ۳۰ دقیقه‌ای | {now_tehran.strftime('%Y-%m-%d %H:%M')} تهران] ---")
+                    print(f"\n--- [چرخه ۳۰ دقیقه‌ای | {tehran_now.strftime('%Y-%m-%d %H:%M')} تهران] ---")
                     await process_and_publish_batch(
                         session=shared_session,
                         breaking_only=False,
                         max_items=MAX_NEWS_PER_CYCLE
                     )
-                    await extras.publish_trending_meme(shared_session)
+                    await publish_trending_meme(shared_session)
                     last_regular_cycle_ts = now_ts
                 else:
-                    # در فواصل ۳ دقیقه‌ای بین دو چرخه، اگر خبر فوری (Breaking News) کشف شد، بلافاصله منتشر شود
                     await process_and_publish_batch(
                         session=shared_session,
                         breaking_only=True,
@@ -1756,7 +2085,7 @@ def main():
 
     application.post_init = post_init
 
-    print("Telegram Bot application started (24/7 Accessible & Breaking Mode)...")
+    print("Telegram Bot application started (24/7 Unified Mode)...")
     application.run_polling(
         drop_pending_updates=True,
         allowed_updates=Update.ALL_TYPES,
