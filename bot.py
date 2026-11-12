@@ -79,7 +79,10 @@ MEME_SUBREDDITS = {
     "movies", "television", "music", "bitcoin", "cryptocurrency", "apple", "iphone", "android", "gamephysics",
 }
 
-GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash-lite']
+# مدل‌های فعال و به‌روز برای هر سه سرویس API
+GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite']
+GROQ_MODELS = ['openai/gpt-oss-120b', 'qwen/qwen3.8-27b', 'openai/gpt-oss-20b']
+OPENROUTER_MODELS = ['openrouter/free', 'nvidia/nemotron-3-ultra-550b-a55b:free']
 GEMINI_EMBEDDING_MODEL = 'text-embedding-004'
 
 CATEGORY_HASHTAGS = {
@@ -861,57 +864,59 @@ async def call_gemini_provider(prompt: str) -> BatchProcessResult | None:
 async def call_groq_provider(prompt: str) -> BatchProcessResult | None:
     for key_idx, groq_key in enumerate(GROQ_API_KEYS, start=1):
         groq_client = AsyncOpenAI(api_key=groq_key, base_url="https://api.groq.com/openai/v1")
-        for attempt in range(1, 3):
-            try:
-                print(f"تلاش با Groq (کلید #{key_idx} | نوبت {attempt})...")
-                completion = await groq_client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
-                    messages=[
-                        {"role": "system", "content": "You are a Chief Editor JSON API. " + JSON_SCHEMA_INSTRUCTION},
-                        {"role": "user", "content": prompt}
-                    ],
-                    response_format={"type": "json_object"},
-                    temperature=0.25
-                )
-                raw_dict = json.loads(completion.choices[0].message.content)
-                validated = BatchProcessResult.model_validate(raw_dict)
-                print(f"✅ موفقیت و اعتبارسنجی Schema با Groq (کلید #{key_idx})")
-                return validated
-            except (ValidationError, json.JSONDecodeError) as ve:
-                print(f"⚠️ خطای اعتبارسنجی Schema در Groq (تلاش مجدد): {ve}")
-                await asyncio.sleep(1)
-            except Exception as e:
-                print(f"⚠️ خطا در Groq (کلید #{key_idx}): {e}")
-                await asyncio.sleep(2)
-                break
+        for model_name in GROQ_MODELS:
+            for attempt in range(1, 3):
+                try:
+                    print(f"تلاش با Groq (کلید #{key_idx} | مدل: {model_name} | نوبت {attempt})...")
+                    completion = await groq_client.chat.completions.create(
+                        model=model_name,
+                        messages=[
+                            {"role": "system", "content": "You are a Chief Editor JSON API. " + JSON_SCHEMA_INSTRUCTION},
+                            {"role": "user", "content": prompt}
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=0.25
+                    )
+                    raw_dict = json.loads(completion.choices[0].message.content)
+                    validated = BatchProcessResult.model_validate(raw_dict)
+                    print(f"✅ موفقیت و اعتبارسنجی Schema با Groq (کلید #{key_idx} | {model_name})")
+                    return validated
+                except (ValidationError, json.JSONDecodeError) as ve:
+                    print(f"⚠️ خطای اعتبارسنجی Schema در Groq ({model_name}): {ve}")
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    print(f"⚠️ خطا در Groq (کلید #{key_idx} | {model_name}): {e}")
+                    await asyncio.sleep(1)
+                    break
     return None
 
 async def call_openrouter_provider(prompt: str) -> BatchProcessResult | None:
     for key_idx, or_key in enumerate(OPENROUTER_API_KEYS, start=1):
         or_client = AsyncOpenAI(api_key=or_key, base_url="https://openrouter.ai/api/v1")
-        for attempt in range(1, 3):
-            try:
-                print(f"تلاش با OpenRouter (کلید #{key_idx} | نوبت {attempt})...")
-                completion = await or_client.chat.completions.create(
-                    model="meta-llama/llama-3.3-70b-instruct:free",
-                    messages=[
-                        {"role": "system", "content": "You are a Chief Editor JSON API. " + JSON_SCHEMA_INSTRUCTION},
-                        {"role": "user", "content": prompt}
-                    ],
-                    response_format={"type": "json_object"},
-                    temperature=0.25
-                )
-                raw_dict = json.loads(completion.choices[0].message.content)
-                validated = BatchProcessResult.model_validate(raw_dict)
-                print(f"✅ موفقیت و اعتبارسنجی Schema با OpenRouter (کلید #{key_idx})")
-                return validated
-            except (ValidationError, json.JSONDecodeError) as ve:
-                print(f"⚠️ خطای اعتبارسنجی Schema در OpenRouter (تلاش مجدد): {ve}")
-                await asyncio.sleep(1)
-            except Exception as e:
-                print(f"⚠️ خطا در OpenRouter (کلید #{key_idx}): {e}")
-                await asyncio.sleep(2)
-                break
+        for model_name in OPENROUTER_MODELS:
+            for attempt in range(1, 3):
+                try:
+                    print(f"تلاش با OpenRouter (کلید #{key_idx} | مدل: {model_name} | نوبت {attempt})...")
+                    completion = await or_client.chat.completions.create(
+                        model=model_name,
+                        messages=[
+                            {"role": "system", "content": "You are a Chief Editor JSON API. " + JSON_SCHEMA_INSTRUCTION},
+                            {"role": "user", "content": prompt}
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=0.25
+                    )
+                    raw_dict = json.loads(completion.choices[0].message.content)
+                    validated = BatchProcessResult.model_validate(raw_dict)
+                    print(f"✅ موفقیت و اعتبارسنجی Schema با OpenRouter (کلید #{key_idx} | {model_name})")
+                    return validated
+                except (ValidationError, json.JSONDecodeError) as ve:
+                    print(f"⚠️ خطای اعتبارسنجی Schema در OpenRouter ({model_name}): {ve}")
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    print(f"⚠️ خطا در OpenRouter (کلید #{key_idx} | {model_name}): {e}")
+                    await asyncio.sleep(1)
+                    break
     return None
 
 async def generate_news_with_fallback(prompt: str) -> BatchProcessResult | None:
@@ -948,22 +953,25 @@ async def ask_ai_json(prompt: str, model_cls, temperature: float = 0.5):
                     break
         return None
 
-    async def openai_compat(keys, base_url, model):
+    async def openai_compat(keys, base_url, models):
         for key in keys:
             client = AsyncOpenAI(api_key=key, base_url=base_url)
-            try:
-                comp = await client.chat.completions.create(
-                    model=model, temperature=temperature, response_format={"type": "json_object"},
-                    messages=[{"role": "system", "content": sys_msg}, {"role": "user", "content": prompt}])
-                return model_cls.model_validate(json.loads(comp.choices[0].message.content))
-            except Exception:
-                continue
+            for model in models:
+                try:
+                    comp = await client.chat.completions.create(
+                        model=model, temperature=temperature, response_format={"type": "json_object"},
+                        messages=[{"role": "system", "content": sys_msg}, {"role": "user", "content": prompt}])
+                    return model_cls.model_validate(json.loads(comp.choices[0].message.content))
+                except (ValidationError, json.JSONDecodeError):
+                    continue
+                except Exception:
+                    break
         return None
 
     backends = [
         gemini_fn,
-        lambda: openai_compat(GROQ_API_KEYS, "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
-        lambda: openai_compat(OPENROUTER_API_KEYS, "https://openrouter.ai/api/v1", "meta-llama/llama-3.3-70b-instruct:free"),
+        lambda: openai_compat(GROQ_API_KEYS, "https://api.groq.com/openai/v1", GROQ_MODELS),
+        lambda: openai_compat(OPENROUTER_API_KEYS, "https://openrouter.ai/api/v1", OPENROUTER_MODELS),
     ]
     start = _extra_ai_rot % 3
     _extra_ai_rot += 1
