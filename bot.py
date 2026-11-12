@@ -12,7 +12,7 @@ import feedparser
 from collections import Counter
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from urllib.parse import urljoin, unquote, quote_plus
+from urllib.parse import quote_plus
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field, ValidationError
 from google import genai
@@ -351,7 +351,7 @@ GREG_MONTHS_FA = ["ژانویه", "فوریه", "مارس", "آوریل", "مه"
                   "ژوئیه", "اوت", "سپتامبر", "اکتبر", "نوامبر", "دسامبر"]
 WEEKDAYS_FA = ["دوشنبه", "سه‌شنبه", "چهارشنبه", "پنج‌شنبه", "جمعه", "شنبه", "یکشنبه"]
 
-def now_tehran() -> datetime:
+def get_current_tehran_time() -> datetime:
     return datetime.now(TEHRAN)
 
 def to_fa_digits(value) -> str:
@@ -746,14 +746,14 @@ async def pin_post(message_id: int):
     try:
         await bot.pin_chat_message(chat_id=TARGET_CHANNEL, message_id=message_id, disable_notification=True)
         pins = _pins_load()
-        pins.append({"id": message_id, "date": now_tehran().strftime("%Y-%m-%d")})
+        pins.append({"id": message_id, "date": get_current_tehran_time().strftime("%Y-%m-%d")})
         set_metadata("pinned_posts", json.dumps(pins))
         print(f"📌 پست {message_id} پین شد (تا ۰۰:۰۰ همین روز).")
     except Exception as e:
         print(f"⚠️ پین ناموفق (ربات باید ادمین با دسترسی Pin Messages باشد): {e}")
 
 async def unpin_expired_pins(session=None):
-    today = now_tehran().strftime("%Y-%m-%d")
+    today = get_current_tehran_time().strftime("%Y-%m-%d")
     pins = _pins_load()
     if not pins:
         return
@@ -1121,9 +1121,9 @@ def build_usd_post(value: int, sources: list, verse: dict, dt: datetime) -> str:
     return "\n".join(lines)
 
 async def publish_daily_usd_post_if_due(session):
-    now = now_tehran()
-    today = now.strftime("%Y-%m-%d")
-    if not (USD_POST_HOUR <= now.hour < USD_WINDOW_END_HOUR):
+    current_tehran = get_current_tehran_time()
+    today = current_tehran.strftime("%Y-%m-%d")
+    if not (USD_POST_HOUR <= current_tehran.hour < USD_WINDOW_END_HOUR):
         return
     if get_metadata("last_usd_post_date") == today:
         return
@@ -1133,7 +1133,7 @@ async def publish_daily_usd_post_if_due(session):
         return
     value, sources = got
     verse = await fetch_saadi_verse(session)
-    text = build_usd_post(value, sources, verse, now)
+    text = build_usd_post(value, sources, verse, current_tehran)
     markup = InlineKeyboardMarkup([[InlineKeyboardButton("📜 خواندن شعر کامل در گنجور", url=verse["url"])]])
     msg = await send_post(session, text, reply_markup=markup, silent=False)
     set_metadata("last_usd_post_date", today)
@@ -1322,18 +1322,18 @@ def build_daily_rec_post(rec: DailyRec, info, genre_fa: str, occasion, dt: datet
     return "\n".join(lines)
 
 async def publish_daily_recommendation_if_due(session):
-    now = now_tehran()
-    today = now.strftime("%Y-%m-%d")
-    if not (DAILY_REC_HOUR <= now.hour < DAILY_REC_WINDOW_END_HOUR):
+    current_tehran = get_current_tehran_time()
+    today = current_tehran.strftime("%Y-%m-%d")
+    if not (DAILY_REC_HOUR <= current_tehran.hour < DAILY_REC_WINDOW_END_HOUR):
         return
     if get_metadata("last_daily_rec_date") == today:
         return
-    result = await generate_daily_recommendation(session, now)
+    result = await generate_daily_recommendation(session, current_tehran)
     if not result:
         print("⚠️ تولید پیشنهاد روزانه ناموفق بود؛ چرخه‌ی بعد دوباره تلاش می‌شود.")
         return
     rec, info, genre_key, genre_fa, occasion = result
-    text = build_daily_rec_post(rec, info, genre_fa, occasion, now)
+    text = build_daily_rec_post(rec, info, genre_fa, occasion, current_tehran)
     m, mu = rec.movie, rec.music
     imdb_url = f"https://www.imdb.com/title/{info['id']}/" if info and info.get("id") else \
         f"https://www.imdb.com/find/?q={quote_plus(m.title_en + ' ' + str(m.year))}"
@@ -1555,7 +1555,7 @@ are not in the title. Reject anything insulting, sexual, hateful, religious or p
                         reply_to=reply_to, filename=f"meme_{c['index']}.jpg")
         seen = (_meme_seen() + [c["link"]])[-300:]
         set_metadata("meme_seen", json.dumps(seen))
-        set_metadata("last_meme_ts", str(now_tehran().timestamp()))
+        set_metadata("last_meme_ts", str(get_current_tehran_time().timestamp()))
         return True
     except Exception as err:
         print(f"⚠️ ارسال شوخی ناموفق: {err}")
@@ -1575,10 +1575,11 @@ async def post_meme_reply_for_news(session, sel, news_msg_id: int) -> bool:
 
 async def publish_trending_meme(session):
     try:
+        current_tehran = get_current_tehran_time()
         last = float(get_metadata("last_meme_ts", "0") or 0)
-        if now_tehran().timestamp() - last < MEME_STANDALONE_GAP_MIN * 60:
+        if current_tehran.timestamp() - last < MEME_STANDALONE_GAP_MIN * 60:
             return
-        if 0 <= now_tehran().hour < 8:
+        if 0 <= current_tehran.hour < 8:
             return
         for tr in detect_24h_trends(top_n=3):
             entity = tr["entity"]
@@ -1862,7 +1863,7 @@ async def process_and_publish_batch(
 
     selected_items = await enrich_selected_items(session, selected_items, batch_map)
 
-    tehran_hour = datetime.now(ZoneInfo("Asia/Tehran")).hour
+    tehran_hour = get_current_tehran_time().hour
     silent_mode = (0 <= tehran_hour < 8) and not breaking_only
     memes_posted = 0
 
@@ -1919,10 +1920,10 @@ async def process_and_publish_batch(
 
 # ================= ۱۵. گزارش خلاصه روزانه (Daily Digest ساعت ۰۰:۰۰ به وقت تهران) =================
 async def publish_daily_digest_if_due():
-    now_tehran = now_tehran()
-    today_str = now_tehran.strftime("%Y-%m-%d")
+    current_tehran = get_current_tehran_time()
+    today_str = current_tehran.strftime("%Y-%m-%d")
 
-    if now_tehran.hour != 0 or now_tehran.minute > 20:
+    if current_tehran.hour != 0 or current_tehran.minute > 20:
         return
     if get_metadata("last_daily_digest_date") == today_str:
         return
@@ -2045,7 +2046,7 @@ async def background_news_loop(app_bot):
     while True:
         try:
             now_ts = datetime.now(timezone.utc).timestamp()
-            tehran_now = now_tehran()
+            tehran_now = get_current_tehran_time()
 
             connector = aiohttp.TCPConnector(limit=25, ssl=False)
             async with aiohttp.ClientSession(connector=connector) as shared_session:
