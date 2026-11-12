@@ -45,16 +45,16 @@ NAVASAN_API_KEY = os.environ.get("NAVASAN_API_KEY", "")
 BRSAPI_KEY = os.environ.get("BRSAPI_KEY", "")
 
 TARGET_CHANNEL = '@jazebestore'
-STORE_BASE_URL = 'https://jazebestore.com'
+STORE_BASE_URL = '[https://jazebestore.com](https://jazebestore.com)'
 CHANNEL_SIGNATURE = "\n\n🎮 @jazebestore"
 DB_PATH = 'rss_news_history.db'
 
-# تنظیمات زمانی: بررسی اخبار فوری هر ۳ دقیقه | چرخه کامل هر ۳۰ دقیقه | ۱۵ خبر در هر چرخه
+# تنظیمات زمانی: بررسی اخبار فوری هر ۳ دقیقه | چرخه کامل هر ۳۰ دقیقه | حداکثر ۳۵ کاندیدا در هر پرامپت (زیر سقف 7000 توکن Groq)
 BREAKING_CHECK_INTERVAL_SECONDS = 180
 REGULAR_CYCLE_SECONDS = 1800
-MAX_NEWS_PER_CYCLE = 15
+MAX_NEWS_PER_CYCLE = 12
 MAX_BREAKING_PER_CYCLE = 3
-MAX_CANDIDATES_FOR_AI = 80
+MAX_CANDIDATES_FOR_AI = 35
 SEMANTIC_SIMILARITY_THRESHOLD = 0.78
 CLUSTER_SIMILARITY_THRESHOLD = 0.72
 HYPE_HALF_LIFE_HOURS = 18.0
@@ -68,8 +68,8 @@ DAILY_REC_WINDOW_END_HOUR = 17
 MEME_MAX_PER_CYCLE = 2
 MEME_MIN_HYPE = 6
 MEME_STANDALONE_GAP_MIN = 90
-ARTICLE_MAX_CHARS = 2200
-ENRICH_CHUNK = 4
+ARTICLE_MAX_CHARS = 1800
+ENRICH_CHUNK = 3
 
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 REDDIT_UA = {"User-Agent": "jazebe-news-bot/1.0"}
@@ -80,9 +80,9 @@ MEME_SUBREDDITS = {
 }
 
 # مدل‌های فعال و به‌روز برای هر سه سرویس API
-GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite']
-GROQ_MODELS = ['openai/gpt-oss-120b', 'qwen/qwen3.8-27b', 'openai/gpt-oss-20b']
-OPENROUTER_MODELS = ['openrouter/free', 'nvidia/nemotron-3-ultra-550b-a55b:free']
+GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-3.8-flash', 'gemini-3.5-flash-lite']
+GROQ_MODELS = ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b', 'openai/gpt-oss-20b']
+OPENROUTER_MODELS = ['meta-llama/llama-3.3-70b-instruct:free', 'google/gemma-3-27b-it:free', 'openrouter/free']
 GEMINI_EMBEDDING_MODEL = 'text-embedding-004'
 
 CATEGORY_HASHTAGS = {
@@ -127,126 +127,126 @@ BREAKING_TRIGGER_KEYWORDS = [
 
 CATEGORIZED_RSS_SOURCES = {
     "gaming": [
-        "https://www.ign.com/rss/v2/articles/feed",
-        "https://feeds.feedburner.com/ign/news",
-        "https://feeds.feedburner.com/ign/reviews",
-        "https://feeds.feedburner.com/ign/games-all",
-        "https://www.gamespot.com/feeds/mashup/",
-        "https://www.eurogamer.net/?format=rss",
-        "https://www.videogameschronicle.com/feed/",
-        "https://www.pcgamer.com/feeds.xml",
-        "https://www.polygon.com/rss/index.xml",
-        "https://kotaku.com/rss",
-        "https://www.rockpapershotgun.com/feed",
-        "https://www.gamesindustry.biz/feed",
-        "https://www.gematsu.com/feed",
-        "https://www.pushsquare.com/feeds/latest",
-        "https://www.purexbox.com/feeds/latest",
-        "https://www.nintendolife.com/feeds/latest",
-        "https://www.gamedeveloper.com/rss.xml",
-        "https://blog.playstation.com/feed/",
-        "https://news.xbox.com/en-us/feed/",
-        "https://www.zoomg.ir/feed/",
-        "https://vigiato.net/feed",
-        "https://gamefa.com/feed"
+        "[https://www.ign.com/rss/v2/articles/feed](https://www.ign.com/rss/v2/articles/feed)",
+        "[https://feeds.feedburner.com/ign/news](https://feeds.feedburner.com/ign/news)",
+        "[https://feeds.feedburner.com/ign/reviews](https://feeds.feedburner.com/ign/reviews)",
+        "[https://feeds.feedburner.com/ign/games-all](https://feeds.feedburner.com/ign/games-all)",
+        "[https://www.gamespot.com/feeds/mashup/](https://www.gamespot.com/feeds/mashup/)",
+        "[https://www.eurogamer.net/?format=rss](https://www.eurogamer.net/?format=rss)",
+        "[https://www.videogameschronicle.com/feed/](https://www.videogameschronicle.com/feed/)",
+        "[https://www.pcgamer.com/feeds.xml](https://www.pcgamer.com/feeds.xml)",
+        "[https://www.polygon.com/rss/index.xml](https://www.polygon.com/rss/index.xml)",
+        "[https://kotaku.com/rss](https://kotaku.com/rss)",
+        "[https://www.rockpapershotgun.com/feed](https://www.rockpapershotgun.com/feed)",
+        "[https://www.gamesindustry.biz/feed](https://www.gamesindustry.biz/feed)",
+        "[https://www.gematsu.com/feed](https://www.gematsu.com/feed)",
+        "[https://www.pushsquare.com/feeds/latest](https://www.pushsquare.com/feeds/latest)",
+        "[https://www.purexbox.com/feeds/latest](https://www.purexbox.com/feeds/latest)",
+        "[https://www.nintendolife.com/feeds/latest](https://www.nintendolife.com/feeds/latest)",
+        "[https://www.gamedeveloper.com/rss.xml](https://www.gamedeveloper.com/rss.xml)",
+        "[https://blog.playstation.com/feed/](https://blog.playstation.com/feed/)",
+        "[https://news.xbox.com/en-us/feed/](https://news.xbox.com/en-us/feed/)",
+        "[https://www.zoomg.ir/feed/](https://www.zoomg.ir/feed/)",
+        "[https://vigiato.net/feed](https://vigiato.net/feed)",
+        "[https://gamefa.com/feed](https://gamefa.com/feed)"
     ],
     "technology": [
-        "https://www.theverge.com/rss/index.xml",
-        "https://www.theverge.com/rss/tech/index.xml",
-        "https://feeds.arstechnica.com/arstechnica/index",
-        "https://www.wired.com/feed/rss",
-        "https://techcrunch.com/feed/",
-        "https://techcrunch.com/category/artificial-intelligence/feed/",
-        "https://www.engadget.com/rss.xml",
-        "https://www.cnet.com/rss/news/",
-        "https://www.techradar.com/feeds.xml",
-        "https://gizmodo.com/feed",
-        "https://mashable.com/feeds/rss/all",
-        "https://www.techmeme.com/feed.xml",
-        "https://feeds.macrumors.com/MacRumors-All",
-        "https://9to5mac.com/feed/",
-        "https://www.zoomit.ir/feed/",
-        "https://digiato.com/feed"
+        "[https://www.theverge.com/rss/index.xml](https://www.theverge.com/rss/index.xml)",
+        "[https://www.theverge.com/rss/tech/index.xml](https://www.theverge.com/rss/tech/index.xml)",
+        "[https://feeds.arstechnica.com/arstechnica/index](https://feeds.arstechnica.com/arstechnica/index)",
+        "[https://www.wired.com/feed/rss](https://www.wired.com/feed/rss)",
+        "[https://techcrunch.com/feed/](https://techcrunch.com/feed/)",
+        "[https://techcrunch.com/category/artificial-intelligence/feed/](https://techcrunch.com/category/artificial-intelligence/feed/)",
+        "[https://www.engadget.com/rss.xml](https://www.engadget.com/rss.xml)",
+        "[https://www.cnet.com/rss/news/](https://www.cnet.com/rss/news/)",
+        "[https://www.techradar.com/feeds.xml](https://www.techradar.com/feeds.xml)",
+        "[https://gizmodo.com/feed](https://gizmodo.com/feed)",
+        "[https://mashable.com/feeds/rss/all](https://mashable.com/feeds/rss/all)",
+        "[https://www.techmeme.com/feed.xml](https://www.techmeme.com/feed.xml)",
+        "[https://feeds.macrumors.com/MacRumors-All](https://feeds.macrumors.com/MacRumors-All)",
+        "[https://9to5mac.com/feed/](https://9to5mac.com/feed/)",
+        "[https://www.zoomit.ir/feed/](https://www.zoomit.ir/feed/)",
+        "[https://digiato.com/feed](https://digiato.com/feed)"
     ],
     "hardware": [
-        "https://www.tomshardware.com/feeds/all",
-        "https://www.techspot.com/backend.xml",
-        "https://www.notebookcheck.net/RSS-Feed.8156.0.html",
-        "https://www.techpowerup.com/rss/news",
-        "https://www.youtube.com/feeds/videos.xml?channel_id=UCI8iQa1hv7oV_Z8D35vVuSg",
-        "https://www.youtube.com/feeds/videos.xml?channel_id=UChIs72whgZI9w6d6FhwGGHA"
+        "[https://www.tomshardware.com/feeds/all](https://www.tomshardware.com/feeds/all)",
+        "[https://www.techspot.com/backend.xml](https://www.techspot.com/backend.xml)",
+        "[https://www.notebookcheck.net/RSS-Feed.8156.0.html](https://www.notebookcheck.net/RSS-Feed.8156.0.html)",
+        "[https://www.techpowerup.com/rss/news](https://www.techpowerup.com/rss/news)",
+        "[https://www.youtube.com/feeds/videos.xml?channel_id=UCI8iQa1hv7oV_Z8D35vVuSg](https://www.youtube.com/feeds/videos.xml?channel_id=UCI8iQa1hv7oV_Z8D35vVuSg)",
+        "[https://www.youtube.com/feeds/videos.xml?channel_id=UChIs72whgZI9w6d6FhwGGHA](https://www.youtube.com/feeds/videos.xml?channel_id=UChIs72whgZI9w6d6FhwGGHA)"
     ],
     "crypto": [
-        "https://www.coindesk.com/arc/outboundfeeds/rss/",
-        "https://cointelegraph.com/rss",
-        "https://www.theblock.co/rss.xml",
-        "https://decrypt.co/feed",
-        "https://bitcoinmagazine.com/feed",
-        "https://www.dlnews.com/arc/outboundfeeds/rss/",
-        "https://blockworks.co/feed",
-        "https://cryptoslate.com/feed/",
-        "https://thedefiant.io/feed",
-        "https://u.today/rss",
-        "https://beincrypto.com/feed/",
-        "https://protos.com/feed"
+        "[https://www.coindesk.com/arc/outboundfeeds/rss/](https://www.coindesk.com/arc/outboundfeeds/rss/)",
+        "[https://cointelegraph.com/rss](https://cointelegraph.com/rss)",
+        "[https://www.theblock.co/rss.xml](https://www.theblock.co/rss.xml)",
+        "[https://decrypt.co/feed](https://decrypt.co/feed)",
+        "[https://bitcoinmagazine.com/feed](https://bitcoinmagazine.com/feed)",
+        "[https://www.dlnews.com/arc/outboundfeeds/rss/](https://www.dlnews.com/arc/outboundfeeds/rss/)",
+        "[https://blockworks.co/feed](https://blockworks.co/feed)",
+        "[https://cryptoslate.com/feed/](https://cryptoslate.com/feed/)",
+        "[https://thedefiant.io/feed](https://thedefiant.io/feed)",
+        "[https://u.today/rss](https://u.today/rss)",
+        "[https://beincrypto.com/feed/](https://beincrypto.com/feed/)",
+        "[https://protos.com/feed](https://protos.com/feed)"
     ],
     "film_tv": [
-        "https://variety.com/feed/",
-        "https://variety.com/v/film/feed/",
-        "https://variety.com/v/tv/feed/",
-        "https://variety.com/v/music/feed/",
-        "https://www.hollywoodreporter.com/feed/",
-        "https://deadline.com/feed/",
-        "https://www.indiewire.com/feed/",
-        "https://www.thewrap.com/feed/",
-        "https://collider.com/feed/",
-        "https://screenrant.com/feed/",
-        "https://www.rogerebert.com/feed",
-        "https://www.avclub.com/rss",
-        "https://consequence.net/feed/",
-        "https://www.slashfilm.com/feed/",
-        "https://www.denofgeek.com/feed/",
-        "https://bloody-disgusting.com/feed/"
+        "[https://variety.com/feed/](https://variety.com/feed/)",
+        "[https://variety.com/v/film/feed/](https://variety.com/v/film/feed/)",
+        "[https://variety.com/v/tv/feed/](https://variety.com/v/tv/feed/)",
+        "[https://variety.com/v/music/feed/](https://variety.com/v/music/feed/)",
+        "[https://www.hollywoodreporter.com/feed/](https://www.hollywoodreporter.com/feed/)",
+        "[https://deadline.com/feed/](https://deadline.com/feed/)",
+        "[https://www.indiewire.com/feed/](https://www.indiewire.com/feed/)",
+        "[https://www.thewrap.com/feed/](https://www.thewrap.com/feed/)",
+        "[https://collider.com/feed/](https://collider.com/feed/)",
+        "[https://screenrant.com/feed/](https://screenrant.com/feed/)",
+        "[https://www.rogerebert.com/feed](https://www.rogerebert.com/feed)",
+        "[https://www.avclub.com/rss](https://www.avclub.com/rss)",
+        "[https://consequence.net/feed/](https://consequence.net/feed/)",
+        "[https://www.slashfilm.com/feed/](https://www.slashfilm.com/feed/)",
+        "[https://www.denofgeek.com/feed/](https://www.denofgeek.com/feed/)",
+        "[https://bloody-disgusting.com/feed/](https://bloody-disgusting.com/feed/)"
     ],
     "internet_culture": [
-        "https://knowyourmeme.com/newsfeed.rss",
-        "https://knowyourmeme.com/editorials.rss",
-        "https://www.tmz.com/rss.xml",
-        "https://www.buzzfeed.com/index.xml",
-        "https://www.dexerto.com/feed/",
-        "https://www.complex.com/feed/",
-        "https://www.thedailybeast.com/feed",
-        "https://www.vulture.com/rss/index.xml",
-        "https://www.themarysue.com/feed/"
+        "[https://knowyourmeme.com/newsfeed.rss](https://knowyourmeme.com/newsfeed.rss)",
+        "[https://knowyourmeme.com/editorials.rss](https://knowyourmeme.com/editorials.rss)",
+        "[https://www.tmz.com/rss.xml](https://www.tmz.com/rss.xml)",
+        "[https://www.buzzfeed.com/index.xml](https://www.buzzfeed.com/index.xml)",
+        "[https://www.dexerto.com/feed/](https://www.dexerto.com/feed/)",
+        "[https://www.complex.com/feed/](https://www.complex.com/feed/)",
+        "[https://www.thedailybeast.com/feed](https://www.thedailybeast.com/feed)",
+        "[https://www.vulture.com/rss/index.xml](https://www.vulture.com/rss/index.xml)",
+        "[https://www.themarysue.com/feed/](https://www.themarysue.com/feed/)"
     ],
     "music": [
-        "https://www.billboard.com/feed/",
-        "https://www.rollingstone.com/feed/",
-        "https://pitchfork.com/feed/feed-news/rss",
-        "https://pitchfork.com/feed/feed-album-reviews/rss",
-        "https://www.stereogum.com/feed/",
-        "https://www.nme.com/feed",
-        "https://www.musicbusinessworldwide.com/feed/",
-        "https://www.thefader.com/rss",
-        "https://feeds.npr.org/1039/rss.xml",
-        "https://www.digitalmusicnews.com/feed/",
-        "https://musictech.com/feed/",
-        "https://ra.co/xml",
-        "https://www.spin.com/feed/"
+        "[https://www.billboard.com/feed/](https://www.billboard.com/feed/)",
+        "[https://www.rollingstone.com/feed/](https://www.rollingstone.com/feed/)",
+        "[https://pitchfork.com/feed/feed-news/rss](https://pitchfork.com/feed/feed-news/rss)",
+        "[https://pitchfork.com/feed/feed-album-reviews/rss](https://pitchfork.com/feed/feed-album-reviews/rss)",
+        "[https://www.stereogum.com/feed/](https://www.stereogum.com/feed/)",
+        "[https://www.nme.com/feed](https://www.nme.com/feed)",
+        "[https://www.musicbusinessworldwide.com/feed/](https://www.musicbusinessworldwide.com/feed/)",
+        "[https://www.thefader.com/rss](https://www.thefader.com/rss)",
+        "[https://feeds.npr.org/1039/rss.xml](https://feeds.npr.org/1039/rss.xml)",
+        "[https://www.digitalmusicnews.com/feed/](https://www.digitalmusicnews.com/feed/)",
+        "[https://musictech.com/feed/](https://musictech.com/feed/)",
+        "[https://ra.co/xml](https://ra.co/xml)",
+        "[https://www.spin.com/feed/](https://www.spin.com/feed/)"
     ],
     "general_news": [
-        "https://feeds.bbci.co.uk/news/rss.xml",
-        "https://feeds.bbci.co.uk/news/technology/rss.xml",
-        "https://www.theguardian.com/world/rss",
-        "https://feeds.npr.org/1001/rss.xml",
-        "https://www.aljazeera.com/xml/rss/all.xml",
-        "https://www.bloomberg.com/feeds/news.rss",
-        "https://www.bloomberg.com/feeds/markets/news.rss",
-        "https://www.ft.com/rss/home/international",
-        "https://www.cnbc.com/id/100003114/device/rss/rss.html",
-        "https://www.economist.com/finance-and-economics/rss.xml",
-        "https://news.google.com/rss/search?q=site%3Areuters.com&hl=en-US&gl=US&ceid=US:en",
-        "https://news.google.com/rss/search?q=site%3Aapnews.com&hl=en-US&gl=US&ceid=US:en"
+        "[https://feeds.bbci.co.uk/news/rss.xml](https://feeds.bbci.co.uk/news/rss.xml)",
+        "[https://feeds.bbci.co.uk/news/technology/rss.xml](https://feeds.bbci.co.uk/news/technology/rss.xml)",
+        "[https://www.theguardian.com/world/rss](https://www.theguardian.com/world/rss)",
+        "[https://feeds.npr.org/1001/rss.xml](https://feeds.npr.org/1001/rss.xml)",
+        "[https://www.aljazeera.com/xml/rss/all.xml](https://www.aljazeera.com/xml/rss/all.xml)",
+        "[https://www.bloomberg.com/feeds/news.rss](https://www.bloomberg.com/feeds/news.rss)",
+        "[https://www.bloomberg.com/feeds/markets/news.rss](https://www.bloomberg.com/feeds/markets/news.rss)",
+        "[https://www.ft.com/rss/home/international](https://www.ft.com/rss/home/international)",
+        "[https://www.cnbc.com/id/100003114/device/rss/rss.html](https://www.cnbc.com/id/100003114/device/rss/rss.html)",
+        "[https://www.economist.com/finance-and-economics/rss.xml](https://www.economist.com/finance-and-economics/rss.xml)",
+        "[https://news.google.com/rss/search?q=site%3Areuters.com&hl=en-US&gl=US&ceid=US:en](https://news.google.com/rss/search?q=site%3Areuters.com&hl=en-US&gl=US&ceid=US:en)",
+        "[https://news.google.com/rss/search?q=site%3Aapnews.com&hl=en-US&gl=US&ceid=US:en](https://news.google.com/rss/search?q=site%3Aapnews.com&hl=en-US&gl=US&ceid=US:en)"
     ]
 }
 
@@ -801,7 +801,7 @@ class BatchProcessResult(BaseModel):
 
 # ================= ۹. موتور پردازش ۳ گانه AI با اعتبارسنجی Pydantic و Retry =================
 JSON_SCHEMA_INSTRUCTION = """
-Respond ONLY with a valid JSON object matching this exact schema:
+Respond ONLY with a valid JSON object matching this exact schema (no markdown fences):
 {
   "selected_news": [
     {
@@ -831,6 +831,20 @@ Respond ONLY with a valid JSON object matching this exact schema:
 }
 """
 
+def _extract_json_from_llm_content(raw_content: str | None) -> dict:
+    if not raw_content or not isinstance(raw_content, str):
+        raise ValueError("Empty or None content returned from LLM")
+    cleaned = raw_content.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r'^```(?:json)?\s*', '', cleaned)
+        cleaned = re.sub(r'\s*```$', '', cleaned).strip()
+    # استخراج اولین بلوک JSON معتبر در صورت وجود متن اضافی در ابتدا یا انتها
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        cleaned = cleaned[start:end + 1]
+    return json.loads(cleaned)
+
 async def call_gemini_provider(prompt: str) -> BatchProcessResult | None:
     for key_idx, api_key in enumerate(GEMINI_API_KEYS, start=1):
         temp_client = genai.Client(api_key=api_key)
@@ -848,16 +862,16 @@ async def call_gemini_provider(prompt: str) -> BatchProcessResult | None:
                             temperature=0.25
                         )
                     )
-                    raw_dict = json.loads(response.text)
+                    raw_dict = _extract_json_from_llm_content(response.text)
                     validated = BatchProcessResult.model_validate(raw_dict)
                     print(f"✅ موفقیت و اعتبارسنجی Schema با Gemini (کلید #{key_idx} | {model_name})")
                     return validated
-                except (ValidationError, json.JSONDecodeError) as ve:
+                except (ValidationError, json.JSONDecodeError, ValueError) as ve:
                     print(f"⚠️ خطای اعتبارسنجی Schema در Gemini: {ve}")
                     await asyncio.sleep(1)
                 except Exception as e:
                     print(f"⚠️ خطا در ارتباط با Gemini (کلید #{key_idx} | {model_name}): {e}")
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(1.5)
                     break
     return None
 
@@ -877,11 +891,12 @@ async def call_groq_provider(prompt: str) -> BatchProcessResult | None:
                         response_format={"type": "json_object"},
                         temperature=0.25
                     )
-                    raw_dict = json.loads(completion.choices[0].message.content)
+                    content = completion.choices[0].message.content if completion.choices else None
+                    raw_dict = _extract_json_from_llm_content(content)
                     validated = BatchProcessResult.model_validate(raw_dict)
                     print(f"✅ موفقیت و اعتبارسنجی Schema با Groq (کلید #{key_idx} | {model_name})")
                     return validated
-                except (ValidationError, json.JSONDecodeError) as ve:
+                except (ValidationError, json.JSONDecodeError, ValueError) as ve:
                     print(f"⚠️ خطای اعتبارسنجی Schema در Groq ({model_name}): {ve}")
                     await asyncio.sleep(1)
                 except Exception as e:
@@ -897,20 +912,21 @@ async def call_openrouter_provider(prompt: str) -> BatchProcessResult | None:
             for attempt in range(1, 3):
                 try:
                     print(f"تلاش با OpenRouter (کلید #{key_idx} | مدل: {model_name} | نوبت {attempt})...")
+                    # عدم ارسال اجباری response_format در OpenRouter برای جلوگیری از بازگشت None در مدل‌های رایگان
                     completion = await or_client.chat.completions.create(
                         model=model_name,
                         messages=[
                             {"role": "system", "content": "You are a Chief Editor JSON API. " + JSON_SCHEMA_INSTRUCTION},
                             {"role": "user", "content": prompt}
                         ],
-                        response_format={"type": "json_object"},
                         temperature=0.25
                     )
-                    raw_dict = json.loads(completion.choices[0].message.content)
+                    content = completion.choices[0].message.content if completion.choices else None
+                    raw_dict = _extract_json_from_llm_content(content)
                     validated = BatchProcessResult.model_validate(raw_dict)
                     print(f"✅ موفقیت و اعتبارسنجی Schema با OpenRouter (کلید #{key_idx} | {model_name})")
                     return validated
-                except (ValidationError, json.JSONDecodeError) as ve:
+                except (ValidationError, json.JSONDecodeError, ValueError) as ve:
                     print(f"⚠️ خطای اعتبارسنجی Schema در OpenRouter ({model_name}): {ve}")
                     await asyncio.sleep(1)
                 except Exception as e:
@@ -946,23 +962,29 @@ async def ask_ai_json(prompt: str, model_cls, temperature: float = 0.5):
                         client.models.generate_content, model=model, contents=prompt,
                         config=types.GenerateContentConfig(
                             response_mime_type="application/json", response_schema=model_cls, temperature=temperature))
-                    return model_cls.model_validate(json.loads(resp.text))
-                except (ValidationError, json.JSONDecodeError):
+                    return model_cls.model_validate(_extract_json_from_llm_content(resp.text))
+                except (ValidationError, json.JSONDecodeError, ValueError):
                     continue
                 except Exception:
                     break
         return None
 
-    async def openai_compat(keys, base_url, models):
+    async def openai_compat(keys, base_url, models, use_json_mode: bool = True):
         for key in keys:
             client = AsyncOpenAI(api_key=key, base_url=base_url)
             for model in models:
                 try:
-                    comp = await client.chat.completions.create(
-                        model=model, temperature=temperature, response_format={"type": "json_object"},
-                        messages=[{"role": "system", "content": sys_msg}, {"role": "user", "content": prompt}])
-                    return model_cls.model_validate(json.loads(comp.choices[0].message.content))
-                except (ValidationError, json.JSONDecodeError):
+                    kwargs = {
+                        "model": model,
+                        "temperature": temperature,
+                        "messages": [{"role": "system", "content": sys_msg}, {"role": "user", "content": prompt}],
+                    }
+                    if use_json_mode:
+                        kwargs["response_format"] = {"type": "json_object"}
+                    comp = await client.chat.completions.create(**kwargs)
+                    content = comp.choices[0].message.content if comp.choices else None
+                    return model_cls.model_validate(_extract_json_from_llm_content(content))
+                except (ValidationError, json.JSONDecodeError, ValueError):
                     continue
                 except Exception:
                     break
@@ -970,8 +992,8 @@ async def ask_ai_json(prompt: str, model_cls, temperature: float = 0.5):
 
     backends = [
         gemini_fn,
-        lambda: openai_compat(GROQ_API_KEYS, "https://api.groq.com/openai/v1", GROQ_MODELS),
-        lambda: openai_compat(OPENROUTER_API_KEYS, "https://openrouter.ai/api/v1", OPENROUTER_MODELS),
+        lambda: openai_compat(GROQ_API_KEYS, "https://api.groq.com/openai/v1", GROQ_MODELS, True),
+        lambda: openai_compat(OPENROUTER_API_KEYS, "https://openrouter.ai/api/v1", OPENROUTER_MODELS, False),
     ]
     start = _extra_ai_rot % 3
     _extra_ai_rot += 1
@@ -1638,7 +1660,7 @@ async def fetch_single_feed(session: aiohttp.ClientSession, sem: asyncio.Semapho
                     'source': url,
                     'link': link,
                     'raw_title': title[:250],
-                    'raw_text': cleaned_body[:600],
+                    'raw_text': cleaned_body[:320],
                     'image_url': img_url,
                     'has_video_or_audio': 1 if has_av else 0,
                     'is_breaking_candidate': 1 if is_breaking else 0
@@ -1756,7 +1778,7 @@ async def process_and_publish_batch(
             SELECT id, url, category, source, raw_title, raw_text, image_url, has_video_or_audio, source_count, is_breaking_candidate
             FROM news_items
             WHERE status IN ('pending', 'failed') AND retry_count < 3 AND is_breaking_candidate = 1
-            ORDER BY source_count DESC, id DESC LIMIT 25
+            ORDER BY source_count DESC, id DESC LIMIT 20
         """)
     else:
         c.execute("""
@@ -1775,7 +1797,7 @@ async def process_and_publish_batch(
         SELECT topic_fingerprint
         FROM news_items
         WHERE status = 'published' AND topic_fingerprint IS NOT NULL
-        ORDER BY published_at DESC LIMIT 80
+        ORDER BY published_at DESC LIMIT 45
     """)
     recent_topics = [r[0] for r in c.fetchall() if r[0]]
     conn.close()
@@ -1787,7 +1809,7 @@ async def process_and_publish_batch(
             'category': r[2],
             'source': r[3],
             'title': r[4],
-            'text': r[5],
+            'text': r[5][:320],
             'image_url': r[6],
             'has_video_or_audio': bool(r[7]),
             'source_count': r[8],
@@ -1796,61 +1818,38 @@ async def process_and_publish_batch(
         for r in rows
     ]
 
-    trends_24h = detect_24h_trends(top_n=6)
+    trends_24h = detect_24h_trends(top_n=5)
     candidates_for_ai = [
         {
             "id": item['id'],
-            "default_category": item['category'],
-            "source_domain": item['source'].split('/')[2] if '//' in item['source'] else item['source'],
-            "source_count": item['source_count'],
-            "is_breaking_candidate": item['is_breaking_candidate'],
-            "has_image": bool(item['image_url']),
-            "has_video_or_audio": item['has_video_or_audio'],
+            "cat": item['category'],
+            "src_cnt": item['source_count'],
+            "brk": item['is_breaking_candidate'],
+            "img": bool(item['image_url']),
+            "av": item['has_video_or_audio'],
             "text": item['text']
         }
         for item in current_batch
     ]
 
-    mode_label = "BREAKING NEWS IMMEDIATE DISPATCH" if breaking_only else "REGULAR 30-MIN EDITORIAL CYCLE"
+    mode_label = "BREAKING NEWS" if breaking_only else "30-MIN CYCLE"
     prompt = f"""
-    You are the Chief Editor for '@jazebestore', a premier Accessible Persian Gaming, Tech, Hardware, Crypto, Entertainment, and Internet Culture Telegram channel.
-    Current Year Context: 2026. Dispatch Mode: {mode_label}.
+    Chief Editor for '@jazebestore' (Persian Gaming, Tech, Hardware, Crypto, Entertainment channel). Year: 2026. Mode: {mode_label}.
+    24h Trends: {json.dumps(trends_24h, ensure_ascii=False)}
+    Already published (DO NOT repeat): {json.dumps(recent_topics, ensure_ascii=False)}
+    Candidates: {json.dumps(candidates_for_ai, ensure_ascii=False)}
 
-    24-Hour Trending Topics in our ecosystem:
-    {json.dumps(trends_24h, ensure_ascii=False)}
-
-    Already published topics in the last 48 hours (DO NOT repeat these topics conceptually):
-    {json.dumps(recent_topics, ensure_ascii=False)}
-
-    Incoming news candidates:
-    {json.dumps(candidates_for_ai, ensure_ascii=False)}
-
-    STRICT EDITORIAL, ACCESSIBILITY (WCAG), AND VERIFICATION GUIDELINES:
-    1. SELECTION & DEDUPLICATION:
-       - Select AT MOST {max_items} unique, high-value stories.
-       - Never select items whose information is purely visual with no substantive text context.
-       - Include fun community jokes/gaming memes (`category_id`: "fun_meme") when entertaining candidates exist.
-    2. NEWS VERIFICATION SYSTEM (`verification_status` & `confidence_score`):
-       - Classify `verification_status` strictly into one of:
-         * "خبر رسمی" (Official statement from PlayStation, Xbox, Rockstar, Apple, etc.)
-         * "گزارش رسانه معتبر" (Confirmed report by IGN, Bloomberg, Reuters, Eurogamer, etc.)
-         * "شایعه و لیک" (Insider leaks, datamines, unconfirmed industry rumors)
-         * "خبر تأییدنشده" (Early unverified reports)
-       - Set `confidence_score` (40 to 100) based on source authority and `source_count`.
-    3. SERIALIZED CONTENT (`series_name`):
-       - When an article strongly fits one of our recurring series, assign `series_name` from:
-         ["Game of the Week", "Movie of the Week", "Tech Breakdown", "Weekly Gaming News", "Best Hardware Deals", "This Week in Gaming"].
-       - Otherwise leave `series_name` as "".
-    4. ACCESSIBILITY FOR ALL 4 GROUPS (CRITICAL):
-       - `headline_persian`: Clear, descriptive Persian headline (no clickbait, no emojis, no HTML tags).
-       - `summary_persian`: 4-6 short, clear sentences in polished, natural Persian (NOT word-for-word translation) with proper half-spaces (نیم‌فاصله) and Persian punctuation (، ؛ ؟ «»). Be specific, never vague: include every concrete name, number, date, price, platform and who-said-what found in the text. Wrap 1 to 4 key facts in `<b>...</b>`.
-       - `key_points_persian`: 3 to 5 structured, factual Persian bullets; `background_persian`: 1-2 sentences of context only if supported by the text.
-       - `image_alt_persian`: If `has_image` is true, write a 1-sentence descriptive Persian explanation of what the image/artwork represents for blind screen-reader users.
-       - `av_transcript_summary_persian`: If `has_video_or_audio` is true (or news is about a trailer/podcast/showcase), write a concise Persian text transcript/summary of the video/audio content for deaf users.
-    5. TOPIC TRACKING (`related_game` & `is_new_game_release`):
-       - Keep proper nouns in English. Put the exact canonical English title of the related game, service, or console in `related_game` (e.g., "GTA VI", "PlayStation Plus", "PS5 Pro", "EA SPORTS FC 27"), otherwise "".
-    6. VIDEO NEWS: Prefer candidates with `has_video_or_audio` = true (trailers, showcases, announcements) whenever they are newsworthy.
-    7. PERSIAN STYLE: Use ی/ک فارسی (not ي/ك), keep game/product/company names in English, use established Persian terms where common, and avoid vague or generic wording.
+    Rules:
+    1. Select AT MOST {max_items} unique, high-value stories (skip purely visual items with no text). Include `fun_meme` if funny candidates exist.
+    2. `verification_status`: one of ["خبر رسمی", "گزارش رسانه معتبر", "شایعه و لیک", "خبر تأییدنشده"]. Set `confidence_score` (40-100).
+    3. `series_name`: optional from ["Game of the Week", "Movie of the Week", "Tech Breakdown", "Weekly Gaming News", "Best Hardware Deals", "This Week in Gaming"], else "".
+    4. Accessible Persian (WCAG):
+       - `headline_persian`: clear Persian headline (no emojis/HTML).
+       - `summary_persian`: 4-6 short factual sentences in fluent Persian with proper half-spaces (نیم‌فاصله) & punctuation (، ؛ ؟ «»), keeping English proper nouns; wrap 1-4 key facts in <b>...</b>.
+       - `key_points_persian`: 3-5 factual Persian bullets; `background_persian`: 1-2 context sentences if supported, else "".
+       - `image_alt_persian`: if `img` is true, 1-sentence Persian visual description for blind users.
+       - `av_transcript_summary_persian`: if `av` is true, concise Persian text summary of video/audio for deaf users.
+    5. `related_game`: canonical English title (e.g. "GTA VI", "PlayStation Plus", "PS5 Pro"), else "". Prefer `av`=true when newsworthy.
     """
 
     validated_result = await generate_news_with_fallback(prompt)
