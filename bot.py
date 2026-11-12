@@ -19,6 +19,7 @@ from google.genai import types
 from openai import AsyncOpenAI
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CallbackQueryHandler, ContextTypes
+import jazebe_extras as extras
 
 # ================= ۱. تنظیمات اصلی و کلیدهای API =================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
@@ -309,7 +310,6 @@ provider_rotation_index = 0
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # جدول مدیریت چرخه حیات خبرها با وضعیت‌های: discovered, pending, selected, published, rejected, failed
     c.execute('''CREATE TABLE IF NOT EXISTS news_items (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     url TEXT UNIQUE,
@@ -332,7 +332,6 @@ def init_db():
                     discovered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     published_at TIMESTAMP
                 )''')
-    # جدول رویدادهای هایپ برای محاسبه Decay زمانی و تشخیص ترند ۲۴ ساعته
     c.execute('''CREATE TABLE IF NOT EXISTS hype_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     entity_name TEXT,
@@ -340,7 +339,6 @@ def init_db():
                     score REAL DEFAULT 1.0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )''')
-    # جدول کش کامل محصولات دیجیتالی سایت به همراه ویژگی‌های واقعی استخراج‌شده از صفحه
     c.execute('''CREATE TABLE IF NOT EXISTS digital_products_cache (
                     url TEXT PRIMARY KEY,
                     title TEXT,
@@ -414,14 +412,12 @@ def save_published_news_details(item_id: int, fingerprint: str, pub_cat: str, pu
 
 # ================= ۳. موتور Embedding و محاسبه Cosine Similarity =================
 def compute_local_ngram_embedding(text: str, dim: int = 256) -> list[float]:
-    """بردار ویژگی نرمال‌شده مبتنی بر کلیدواژه و ان-گرم (پشتیبان سریع و بدون توقف برای مقایسه معنایی)"""
     clean = re.sub(r'[^\w\s]', ' ', text.lower())
     tokens = [t for t in clean.split() if len(t) > 2]
     vec = [0.0] * dim
     if not tokens:
         return vec
     counts = Counter(tokens)
-    # اضافه کردن دوگانه‌های کلمات (Bigrams) برای حفظ مفهوم عبارات
     for i in range(len(tokens) - 1):
         counts[f"{tokens[i]}_{tokens[i+1]}"] += 1.5
     for token, weight in counts.items():
@@ -433,7 +429,6 @@ def compute_local_ngram_embedding(text: str, dim: int = 256) -> list[float]:
     return [round(x / norm, 5) for x in vec] if norm > 0 else vec
 
 async def get_text_embedding(text: str) -> list[float]:
-    """دریافت Embedding معنایی از Gemini با fallback خودکار به بردار محلی در صورت محدودیت"""
     for api_key in GEMINI_API_KEYS[:1]:
         try:
             client = genai.Client(api_key=api_key)
@@ -461,10 +456,6 @@ def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 async def run_semantic_clustering_and_deduplication():
-    """
-    مقایسه معنایی خبرهای discovered با اخبار منتشرشده قبلی و خوشه‌بندی اخبار مشابه از منابع مختلف
-    برای شمارش دقیق تعداد منابع (source_count) و تشخیص اخبار فوری.
-    """
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
@@ -495,10 +486,8 @@ async def run_semantic_clustering_and_deduplication():
             except Exception:
                 pass
 
-    # محاسبه بردار معنایی برای خبرهای تازه کشف‌شده
     discovered_items = []
     for row_id, r_title, r_text, src, is_brk in discovered_rows:
-        # استفاده از بردار محلی یکسان برای مقایسه سریع درون‌چرخه و ذخیره در دیتابیس
         emb = compute_local_ngram_embedding(f"{r_title} {r_text}")
         discovered_items.append({
             'id': row_id,
@@ -510,7 +499,6 @@ async def run_semantic_clustering_and_deduplication():
             'duplicate_of_published': False
         })
 
-    # ۱. حذف معنایی خبرهایی که قبلاً منتشر شده‌اند
     rejected_ids = []
     valid_items = []
     for item in discovered_items:
@@ -524,7 +512,6 @@ async def run_semantic_clustering_and_deduplication():
         else:
             valid_items.append(item)
 
-    # ۲. خوشه‌بندی معنایی خبرهای جدید برای شمارش تعداد منابع مستقل و ارتقای خبر فوری
     clusters = []
     for item in valid_items:
         placed = False
@@ -546,7 +533,6 @@ async def run_semantic_clustering_and_deduplication():
     for cluster in clusters:
         primary = cluster[0]
         unique_sources = len({x['source'] for x in cluster})
-        # اگر یک خبر هم‌زمان در ۳ منبع یا بیشتر کار شده باشد، کاندیدای خبر فوری می‌شود
         is_breaking = 1 if (any(x['is_breaking'] for x in cluster) or unique_sources >= 3) else 0
         c.execute("""
             UPDATE news_items
@@ -556,7 +542,6 @@ async def run_semantic_clustering_and_deduplication():
                 embedding_json = ?
             WHERE id = ?
         """, (unique_sources, is_breaking, json.dumps(primary['emb']), primary['id']))
-        # بقیه اعضای تکراری همان خوشه در وضعیت rejected قرار می‌گیرند تا دوباره ارسال نشوند
         for extra in cluster[1:]:
             c.execute("UPDATE news_items SET status = 'rejected' WHERE id = ?", (extra['id'],))
 
@@ -579,10 +564,6 @@ def record_hype_event(entity_name: str, category: str, score: float):
     conn.close()
 
 def get_decayed_hype_scores() -> dict[str, float]:
-    """
-    محاسبه امتیاز هایپ با کاهش نمایی بر اساس زمان (Time-Decay):
-    هر ۱۸ ساعت وزن رویدادهای قدیمی‌تر نصف می‌شود تا بازی‌های قدیمی غالب نشوند.
-    """
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
@@ -602,9 +583,6 @@ def get_decayed_hype_scores() -> dict[str, float]:
     return dict(scores.most_common(50))
 
 def detect_24h_trends(top_n: int = 8) -> list[dict]:
-    """
-    شناسایی بازی‌ها، محصولات و موضوعاتی که در ۲۴ ساعت گذشته بیشترین رشد خبری را داشته‌اند.
-    """
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
@@ -630,13 +608,8 @@ def clean_raw_text(text: str) -> str:
     return re.sub(r'\s+', ' ', text).strip()
 
 def sanitize_telegram_html(text: str) -> str:
-    """
-    ایمن‌سازی کامل خروجی HTML هوش مصنوعی قبل از ارسال به تلگرام:
-    حذف تگ‌های غیرمجاز، بستن تگ‌های بازمانده و تبدیل کاراکترهای خاص برای جلوگیری از شکست انتشار.
-    """
     if not text:
         return ""
-    # تبدیل تگ‌های strong/em به معادل استاندارد b/i
     text = re.sub(r'<\s*strong\s*>', '<b>', text, flags=re.IGNORECASE)
     text = re.sub(r'<\s*/\s*strong\s*>', '</b>', text, flags=re.IGNORECASE)
     text = re.sub(r'<\s*em\s*>', '<i>', text, flags=re.IGNORECASE)
@@ -646,7 +619,6 @@ def sanitize_telegram_html(text: str) -> str:
     placeholders = {}
     counter = 0
 
-    # نگه‌داری تگ‌های مجاز که به‌درستی جفت شده‌اند
     for tag in allowed_tags:
         pattern = re.compile(fr'<{tag}>(.*?)</{tag}>', flags=re.IGNORECASE | re.DOTALL)
         while True:
@@ -661,19 +633,15 @@ def sanitize_telegram_html(text: str) -> str:
             counter += 1
             text = text[:match.start()] + open_tok + inner_content + close_tok + text[match.end():]
 
-    # حذف هرگونه تگ ناقص یا غیرمجاز باقی‌مانده
     text = re.sub(r'<[^>]+>', '', text)
-    # Escape کردن کاراکترهای حساس HTML
     text = html.escape(text)
 
-    # بازگردانی تگ‌های سالم و متوازن
     for tok, real_tag in placeholders.items():
         text = text.replace(tok, real_tag)
 
     return text.strip()
 
 def extract_rss_media_info(entry) -> tuple[str | None, bool]:
-    """استخراج تصویر شاخص و تشخیص وجود محتوای ویدئویی یا صوتی برای دسترس‌پذیری ناشنوایان"""
     img_url = None
     has_av = False
 
@@ -730,8 +698,9 @@ class SelectedNewsItem(BaseModel):
     is_new_game_release: bool = Field(default=False, description="True if the news is about a new game release or pre-order announcement")
     series_name: str = Field(default="", description="Optional recurring series name if applicable: 'Game of the Week', 'Movie of the Week', 'Tech Breakdown', 'Weekly Gaming News', 'Best Hardware Deals', 'This Week in Gaming', or empty string")
     headline_persian: str = Field(description="Descriptive, clear Persian headline without HTML tags or emojis")
-    summary_persian: str = Field(description="Short, accessible, well-edited Persian summary (2-3 short sentences) with 1 to 3 key terms wrapped in <b>...</b>")
-    key_points_persian: list[str] = Field(description="2 to 3 short, structured bullet points in Persian summarizing the key facts (e.g., 'تاریخ انتشار: ...', 'پلتفرم‌ها: ...')")
+    summary_persian: str = Field(description="Detailed, accurate, well-edited Persian summary (4-6 short sentences) answering who/what/when/where/why with every concrete name, number, date, platform and price from the source; wrap 1 to 4 key facts in <b>...</b>")
+    key_points_persian: list[str] = Field(description="3 to 5 short, factual bullet points in Persian (e.g., 'تاریخ انتشار: ...', 'پلتفرم‌ها: ...', 'قیمت: ...')")
+    background_persian: str = Field(default="", description="1-2 sentence Persian background/context supported by the source text, or empty string")
     image_alt_persian: str = Field(default="", description="Clear Persian visual description of the news context/image for blind/screen-reader users")
     av_transcript_summary_persian: str = Field(default="", description="If the source contains video/trailer/audio, provide a clear Persian text transcript/summary of what happens or is said in the video for deaf users")
     topic_hashtags: list[str] = Field(description="2 to 3 specific Persian hashtags starting with # using underscores")
@@ -759,8 +728,10 @@ Respond ONLY with a valid JSON object matching this exact schema:
       "summary_persian": "شرکت Rockstar به‌طور رسمی اعلام کرد که <b>پاییز سال جاری</b> نسخه جدید این مجموعه عرضه خواهد شد.",
       "key_points_persian": [
         "پلتفرم‌های مقصد: PlayStation 5 و Xbox Series X/S",
-        "وضعیت توسعه: ورود به مرحله پولیش نهایی"
+        "وضعیت توسعه: ورود به مرحله پولیش نهایی",
+        "ناشر: Rockstar Games"
       ],
+      "background_persian": "این عنوان پس از چند بار تأخیر، حالا وارد مرحله‌ی پولیش نهایی شده است.",
       "image_alt_persian": "تصویر تبلیغاتی رسمی بازی GTA VI با نمایش شخصیت‌های اصلی در فضای شهری",
       "av_transcript_summary_persian": "",
       "topic_hashtags": ["#راکستار", "#جی_تی_ای"],
@@ -859,7 +830,6 @@ async def call_openrouter_provider(prompt: str) -> BatchProcessResult | None:
     return None
 
 async def generate_news_with_fallback(prompt: str) -> BatchProcessResult | None:
-    """چرخش هوشمند بین ۳ سرویس API به همراه اعتبارسنجی اجباری BatchProcessResult"""
     global provider_rotation_index
     providers = [call_gemini_provider, call_groq_provider, call_openrouter_provider]
     ordered_providers = providers[provider_rotation_index % 3:] + providers[:provider_rotation_index % 3]
@@ -883,10 +853,6 @@ def is_digital_game_or_plus_product(title: str, url: str = "") -> bool:
     return False
 
 def extract_real_product_features(page_text: str, short_desc: str = "") -> dict:
-    """
-    استخراج اطلاعات واقعی محصول (شرایط تحویل، گارانتی، خرید اقساطی، ظرفیت‌ها و پیش‌خرید)
-    مستقیماً از متن صفحه همان محصول بدون استفاده از عبارات ثابت غیرواقعی.
-    """
     combined = f"{short_desc} {page_text}"
     features = {
         "delivery": "",
@@ -896,21 +862,17 @@ def extract_real_product_features(page_text: str, short_desc: str = "") -> dict:
         "is_preorder": False
     }
 
-    # ۱. بررسی واقعی نحوه تحویل
     delivery_match = re.search(r'(تحویل\s*(?:فوری|آنی|در\s*\d+\s*ساعت|خودکار|ایمیلی|تلگرام))', combined)
     if delivery_match:
         features["delivery"] = delivery_match.group(1).strip()
 
-    # ۲. بررسی واقعی گارانتی در صفحه محصول
     warranty_match = re.search(r'(گارانتی\s*(?:دائمی|مادام‌العمر|مادام العمر|تعویض|معتبر|رسمی|\d+\s*ماهه)|ضمانت\s*(?:دائمی|بازگشت\s*وجه|اصالت))', combined)
     if warranty_match:
         features["warranty"] = warranty_match.group(1).strip()
 
-    # ۳. بررسی واقعی امکان خرید اقساطی در صفحه محصول
     if any(k in combined for k in ["اقساط", "قسطی", "اسنپ پی", "اسنپ‌پی", "ترب پی", "دیجی پی", "ازکی وام"]):
         features["installment"] = "امکان خرید نقد و اقساط (طبق شرایط درج‌شده در صفحه محصول)"
 
-    # ۴. بررسی ظرفیت‌های موجود
     caps = []
     if "ظرفیت ۱" in combined or "ظرفیت 1" in combined:
         caps.append("ظرفیت ۱")
@@ -921,7 +883,6 @@ def extract_real_product_features(page_text: str, short_desc: str = "") -> dict:
     if caps:
         features["capacities"] = "، ".join(caps)
 
-    # ۵. تشخیص پیش‌خرید
     if "پیش خرید" in combined or "پیش‌خرید" in combined or "pre-order" in combined.lower():
         features["is_preorder"] = True
 
@@ -950,7 +911,6 @@ def save_digital_products_to_db(products: list[dict]):
     conn.close()
 
 def get_all_available_digital_products() -> list[dict]:
-    """خواندن تمام محصولات دیجیتالی واقعاً موجود و قابل خرید از کش دیتابیس"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
@@ -993,7 +953,6 @@ async def discover_all_product_urls_from_site(session: aiohttp.ClientSession) ->
                     xml_text = await resp.text()
                     locs = re.findall(r'<loc>(https?://[^<]+)</loc>', xml_text)
                     sub_sitemaps = [u for u in locs if 'product' in u and u.endswith('.xml')]
-                    # بررسی تمام زیرنقشه‌های محصول بدون محدودیت
                     for sub_sm in sub_sitemaps:
                         async with session.get(sub_sm, timeout=15, headers=headers) as sub_resp:
                             if sub_resp.status == 200:
@@ -1093,15 +1052,9 @@ async def scrape_single_digital_product(session: aiohttp.ClientSession, url: str
         return None
 
 async def refresh_digital_products_catalog(session: aiohttp.ClientSession):
-    """
-    بروزرسانی کامل کاتالوگ محصولات دیجیتالی سایت (بدون محدودیت ۴۵ تایی):
-    ۱. دریافت صفحه‌بندی‌شده از WooCommerce Store API در صورت فعال بودن
-    ۲. پیمایش کامل لینک‌های Sitemap با اولویت لینک‌های جدید یا قدیمی‌تر در کش
-    """
     collected = []
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
 
-    # مرحله اول: بررسی WooCommerce Store API برای دریافت سریع کل محصولات
     for page_num in range(1, 5):
         api_url = f"{STORE_BASE_URL}/wp-json/wc/store/v1/products?per_page=100&page={page_num}"
         try:
@@ -1151,7 +1104,6 @@ async def refresh_digital_products_catalog(session: aiohttp.ClientSession):
         print(f"✅ کاتالوگ کامل ({len(collected)} محصول دیجیتالی) از طریق API سایت همگام‌سازی شد.")
         return
 
-    # مرحله دوم: در صورت بسته بودن API، پیمایش سیستماتیک کل لینک‌های Sitemap
     all_urls = await discover_all_product_urls_from_site(session)
     if not all_urls:
         print("⚠️ لینکی از نقشه سایت دریافت نشد.")
@@ -1163,7 +1115,6 @@ async def refresh_digital_products_catalog(session: aiohttp.ClientSession):
     recently_updated = {r[0] for r in c.fetchall()}
     conn.close()
 
-    # اولویت با محصولاتی که هنوز در کش نیستند یا بیش از ۶ ساعت از آپدیت آن‌ها گذشته است
     priority_urls = [u for u in all_urls if u not in recently_updated]
     if len(priority_urls) < 100:
         remaining = [u for u in all_urls if u in recently_updated]
@@ -1185,7 +1136,6 @@ async def refresh_digital_products_catalog(session: aiohttp.ClientSession):
 
 # ================= ۹. سیستم پیشنهاد محصول مرتبط با هر خبر (با Alias Mapping) =================
 def resolve_canonical_entity(text: str) -> str:
-    """تبدیل نام‌های مختلف فارسی، انگلیسی و مخفف به کلید استاندارد در PRODUCT_ALIAS_MAP"""
     if not text:
         return ""
     low = text.strip().lower()
@@ -1203,14 +1153,6 @@ def find_matching_store_product_for_news(
     summary: str = "",
     is_new_release: bool = False
 ) -> tuple[dict | None, str]:
-    """
-    پیدا کردن محصول دیجیتالی مرتبط که واقعاً در سایت موجود و قابل خرید باشد:
-    - Plus -> اشتراک PlayStation Plus
-    - خبر GTA VI -> بازی GTA VI
-    - خبر PS5 Pro -> محصولات و خدمات سازگار با PlayStation 5
-    - خبر FC 27 -> اکانت و ظرفیت FC
-    - خبر عرضه بازی جدید -> پیش‌خرید یا محصولات مرتبط همان بازی
-    """
     available_products = get_all_available_digital_products()
     if not available_products:
         return None, ""
@@ -1218,7 +1160,6 @@ def find_matching_store_product_for_news(
     combined_news_context = f"{related_game} {headline} {summary}".lower()
     canonical_key = resolve_canonical_entity(related_game) or resolve_canonical_entity(combined_news_context)
 
-    # ۱. جست‌وجو بر اساس نقشه Alias استاندارد (Plus, GTA VI, PS5 Pro, FC 27 و ...)
     if canonical_key in PRODUCT_ALIAS_MAP:
         rule = PRODUCT_ALIAS_MAP[canonical_key]
         candidates = []
@@ -1227,14 +1168,12 @@ def find_matching_store_product_for_news(
             if any(kw.lower() in p_text for kw in rule["product_keywords"]):
                 candidates.append(prod)
         if candidates:
-            # برای بازی جدید، اولویت با پیش‌خرید است
             if is_new_release:
                 preorders = [c for c in candidates if c.get('real_features', {}).get('is_preorder')]
                 if preorders:
                     return preorders[0], f"🛒 پیش‌خرید و مشاهده {preorders[0]['title'][:30]}"
             return candidates[0], rule["button_label"]
 
-    # ۲. جست‌وجوی تطبیق توکن برای سایر بازی‌های مشخص‌شده در related_game
     if related_game and len(related_game.strip()) >= 3:
         rg_clean = related_game.strip().lower()
         rg_tokens = [t for t in re.split(r'\W+', rg_clean) if len(t) > 2]
@@ -1254,7 +1193,6 @@ def calculate_product_hype_weight(product: dict, decayed_hype_map: dict[str, flo
     if "پلاس" in p_text or "plus" in p_text:
         base_weight += 2.0
 
-    # اعمال امتیاز زمان‌دار (Time-Decayed Hype) با پشتیبانی از Alias Mapping
     for hyped_entity, decayed_score in decayed_hype_map.items():
         canonical = resolve_canonical_entity(hyped_entity)
         if canonical in PRODUCT_ALIAS_MAP:
@@ -1264,7 +1202,6 @@ def calculate_product_hype_weight(product: dict, decayed_hype_map: dict[str, flo
         elif len(hyped_entity) >= 3 and hyped_entity in p_text:
             base_weight += (decayed_score * 2.5)
 
-    # ضریب ویژه برای ترندهای برتر ۲۴ ساعت گذشته
     for tr in trends_24h:
         ent = tr["entity"]
         if len(ent) >= 3 and ent in p_text:
@@ -1290,107 +1227,8 @@ def mark_product_posted(product_url: str):
     conn.close()
 
 async def publish_weighted_digital_products(session: aiohttp.ClientSession):
-    """
-    انتشار محصولات دیجیتالی موجود با اطلاعات واقعی استخراج‌شده از صفحه محصول و رعایت کامل دسترس‌پذیری.
-    """
-    available_products = get_all_available_digital_products()
-    if len(available_products) < PRODUCTS_PER_CYCLE:
-        await refresh_digital_products_catalog(session)
-        available_products = get_all_available_digital_products()
-
-    if not available_products:
-        print("هیچ محصول دیجیتالی موجود و قابل خریدی برای ارسال یافت نشد.")
-        return
-
-    unposted_pool = [p for p in available_products if not was_product_recently_posted(p['url'], hours=12)]
-    candidate_pool = unposted_pool if len(unposted_pool) >= PRODUCTS_PER_CYCLE else available_products
-
-    decayed_hype_map = get_decayed_hype_scores()
-    trends_24h = detect_24h_trends(top_n=6)
-
-    selected_products = []
-    temp_pool = candidate_pool.copy()
-
-    for _ in range(min(PRODUCTS_PER_CYCLE, len(temp_pool))):
-        weights = [calculate_product_hype_weight(p, decayed_hype_map, trends_24h) for p in temp_pool]
-        chosen = random.choices(temp_pool, weights=weights, k=1)[0]
-        chosen['_weight'] = calculate_product_hype_weight(chosen, decayed_hype_map, trends_24h)
-        selected_products.append(chosen)
-        temp_pool.remove(chosen)
-
-    for idx, prod in enumerate(selected_products, start=1):
-        is_plus = "پلاس" in prod['title'].lower() or "plus" in prod['title'].lower()
-        badge_emoji = "💎" if is_plus else "🎮"
-        product_type_text = "اشتراک پلی‌استیشن پلاس" if is_plus else "اکانت دیجیتالی بازی"
-        real_feats = prod.get('real_features', {})
-
-        # ساخت متن دسترس‌پذیر و شفاف فقط بر اساس اطلاعات واقعی موجود در صفحه محصول
-        lines = [
-            f"{badge_emoji} <b>{html.escape(prod['title'])}</b>",
-            f"دسته‌بندی: فروشگاه دیجیتالی | وضعیت موجودی: <b>موجود و قابل خرید</b>",
-            "",
-            "<b>مشخصات و شرایط واقعی محصول:</b>",
-            f"• نوع محصول: {product_type_text}",
-            f"• قیمت فعلی: <b>{html.escape(prod['price'])}</b>"
-        ]
-
-        if real_feats.get("capacities"):
-            lines.append(f"• ظرفیت‌های ذکرشده: {html.escape(real_feats['capacities'])}")
-        if real_feats.get("delivery"):
-            lines.append(f"• نحوه تحویل: <b>{html.escape(real_feats['delivery'])}</b>")
-        if real_feats.get("warranty"):
-            lines.append(f"• شرایط گارانتی: <b>{html.escape(real_feats['warranty'])}</b>")
-        if real_feats.get("installment"):
-            lines.append(f"• شرایط پرداخت: <b>{html.escape(real_feats['installment'])}</b>")
-
-        if prod.get('image_url'):
-            lines.append(f"\n🖼 <b>توضیح تصویر:</b> کاور رسمی محصول {html.escape(prod['title'])} در فروشگاه جاذبه استور.")
-
-        lines.append("\n🏷 #اکانت_ظرفیتی #پلی_استیشن_پلاس #فروشگاه_دیجیتالی")
-        caption = "\n".join(lines) + CHANNEL_SIGNATURE
-
-        # دکمه تمام‌عرض، واضح و بدون ابهام (مناسب برای کاربران دارای محدودیت حرکتی و نابینایان)
-        btn_label = "🛒 مشاهده جزئیات و خرید آنلاین محصول در سایت"
-        if real_feats.get("installment"):
-            btn_label = "💳 مشاهده جزئیات و خرید محصول (نقد و اقساط)"
-
-        keyboard = [
-            [InlineKeyboardButton(btn_label, url=prod['url'])]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        try:
-            if prod.get('image_url'):
-                img_path = await download_image_from_url(session, prod['image_url'], f"prod_{idx}.jpg")
-                if img_path and os.path.exists(img_path):
-                    with open(img_path, 'rb') as photo_file:
-                        await bot.send_photo(
-                            chat_id=TARGET_CHANNEL,
-                            photo=photo_file,
-                            caption=caption,
-                            parse_mode="HTML",
-                            reply_markup=reply_markup
-                        )
-                    os.remove(img_path)
-                else:
-                    await bot.send_message(
-                        chat_id=TARGET_CHANNEL,
-                        text=caption,
-                        parse_mode="HTML",
-                        reply_markup=reply_markup
-                    )
-            else:
-                await bot.send_message(
-                    chat_id=TARGET_CHANNEL,
-                    text=caption,
-                    parse_mode="HTML",
-                    reply_markup=reply_markup
-                )
-            mark_product_posted(prod['url'])
-            print(f"🛒 محصول دیجیتالی ارسال شد: {prod['title']} (وزن هایپ زمان‌دار: {prod.get('_weight', 1.0)})")
-            await asyncio.sleep(8)
-        except Exception as e:
-            print(f"Error sending digital product '{prod['title']}': {e}")
+    """انتشار مستقل محصول در کانال طبق درخواست شما غیرفعال است."""
+    return
 
 # ================= ۱۰. جمع‌آوری هم‌زمان فیدهای RSS با یک Session مشترک =================
 async def fetch_single_feed(session: aiohttp.ClientSession, sem: asyncio.Semaphore, category: str, url: str) -> list[dict]:
@@ -1412,7 +1250,6 @@ async def fetch_single_feed(session: aiohttp.ClientSession, sem: asyncio.Semapho
                 summary = clean_raw_text(getattr(entry, 'summary', ''))
                 cleaned_body = f"{title}\n{summary}".strip()
 
-                # پرهیز از انتشار خبرهایی که متن کافی ندارند و اطلاعاتشان صرفاً داخل تصویر است (استاندارد ۴.۱ نابینایان)
                 if len(cleaned_body) < 45:
                     continue
 
@@ -1435,7 +1272,6 @@ async def fetch_single_feed(session: aiohttp.ClientSession, sem: asyncio.Semapho
             return []
 
 async def fetch_rss_sources(session: aiohttp.ClientSession):
-    """دریافت تمام فیدها با یک Session مشترک و ثبت اولیه با وضعیت discovered در دیتابیس"""
     sem = asyncio.Semaphore(18)
     tasks = [
         fetch_single_feed(session, sem, category, url)
@@ -1474,25 +1310,13 @@ async def fetch_rss_sources(session: aiohttp.ClientSession):
 
 # ================= ۱۱. پردازش، قالب‌بندی دسترس‌پذیر و انتشار اخبار (عادی و فوری) =================
 def format_accessible_news_post(sel: SelectedNewsItem, orig_item: dict, main_cat_hashtag: str) -> str:
-    """
-    ساختار استاندارد دسترس‌پذیر (WCAG & Screen-Reader Friendly) برای تمام پیام‌ها:
-    - مجموعه سریالی یا نشان خبر فوری (در صورت وجود)
-    - تیتر توصیفی و مشخص
-    - دسته‌بندی | وضعیت اعتبارسنجی | درجه اطمینان و تعداد منابع
-    - خلاصه کوتاه و روان با بولد کردن نکات کلیدی
-    - مهم‌ترین نکات (بولت‌پوینت‌های ساختاری)
-    - خلاصه محتوای صوتی/تصویری (برای ناشنوایان در صورت وجود ویدئو/صدا)
-    - توضیح تصویر (برای نابینایان در صورت وجود عکس)
-    """
     lines = []
 
-    # ۱. هدر مجموعه سریالی یا خبر فوری
     if sel.is_breaking:
         lines.append("🚨 <b>خبر فوری | پوشش ویژه</b>")
     if sel.series_name and sel.series_name in SERIALIZED_SERIES_HEADERS:
         lines.append(f"<b>{SERIALIZED_SERIES_HEADERS[sel.series_name]}</b>")
 
-    # ۲. تیتر واضح با یک ایموجی هدفمند
     cat_emoji_map = {
         "gaming": "🎮",
         "technology": "💻",
@@ -1508,7 +1332,6 @@ def format_accessible_news_post(sel: SelectedNewsItem, orig_item: dict, main_cat
     safe_headline = sanitize_telegram_html(sel.headline_persian)
     lines.append(f"{lead_emoji} <b>{safe_headline}</b>")
 
-    # ۳. خط شناسنامه و اعتبارسنجی خبر
     cat_persian = CATEGORY_PERSIAN_NAMES.get(sel.category_id, "اخبار")
     valid_statuses = ["خبر رسمی", "گزارش رسانه معتبر", "شایعه و لیک", "خبر تأییدنشده"]
     ver_status = sel.verification_status if sel.verification_status in valid_statuses else "گزارش رسانه معتبر"
@@ -1519,11 +1342,9 @@ def format_accessible_news_post(sel: SelectedNewsItem, orig_item: dict, main_cat
     lines.append(f"درجه اطمینان: {conf_score}٪ | تعداد منابع: {src_count} منبع")
     lines.append("")
 
-    # ۴. متن خلاصه خبر (ویراستاری‌شده و ایمن‌سازی‌شده)
     safe_summary = sanitize_telegram_html(sel.summary_persian)
     lines.append(safe_summary)
 
-    # ۵. بخش ساختاری «مهم‌ترین نکات:»
     if sel.key_points_persian:
         lines.append("")
         lines.append("<b>مهم‌ترین نکات:</b>")
@@ -1532,7 +1353,6 @@ def format_accessible_news_post(sel: SelectedNewsItem, orig_item: dict, main_cat
             if clean_pt:
                 lines.append(f"• {clean_pt}")
 
-    # ۶. دسترس‌پذیری ناشنوایان و کم‌شنوایان (در صورت وجود ویدئو/تریلر/صوت)
     if orig_item.get('has_video_or_audio') or sel.av_transcript_summary_persian.strip():
         av_text = sanitize_telegram_html(
             sel.av_transcript_summary_persian.strip()
@@ -1541,7 +1361,6 @@ def format_accessible_news_post(sel: SelectedNewsItem, orig_item: dict, main_cat
         lines.append("")
         lines.append(f"📝 <b>متن و خلاصه محتوای ویدئویی/صوتی (ویژه ناشنوایان):</b> {av_text}")
 
-    # ۷. دسترس‌پذیری نابینایان و کم‌بینایان (توضیح تصویر مستقل در متن برای پست‌های عکس‌دار)
     if orig_item.get('image_url'):
         alt_text = sanitize_telegram_html(
             sel.image_alt_persian.strip()
@@ -1550,7 +1369,6 @@ def format_accessible_news_post(sel: SelectedNewsItem, orig_item: dict, main_cat
         lines.append("")
         lines.append(f"🖼 <b>توضیح تصویر:</b> {alt_text}")
 
-    # ۸. هشتگ‌ها
     extra_tags = []
     for tag in sel.topic_hashtags:
         clean_tag = re.sub(r'[^\w#]', '_', tag.strip())
@@ -1663,8 +1481,8 @@ async def process_and_publish_batch(
        - Otherwise leave `series_name` as "".
     4. ACCESSIBILITY FOR ALL 4 GROUPS (CRITICAL):
        - `headline_persian`: Clear, descriptive Persian headline (no clickbait, no emojis, no HTML tags).
-       - `summary_persian`: Short, clear sentences (2-3 sentences max) in polished Persian with proper half-spaces (نیم‌فاصله). Wrap 1 to 3 key facts/dates/numbers in `<b>...</b>`.
-       - `key_points_persian`: 2 to 3 structured Persian bullet items (e.g., "تاریخ انتشار: ...", "پلتفرم‌ها: ...", "وضعیت: ...").
+       - `summary_persian`: 4-6 short, clear sentences in polished, natural Persian (NOT word-for-word translation) with proper half-spaces (نیم‌فاصله) and Persian punctuation (، ؛ ؟ «»). Be specific, never vague: include every concrete name, number, date, price, platform and who-said-what found in the text. Wrap 1 to 4 key facts in `<b>...</b>`.
+       - `key_points_persian`: 3 to 5 structured, factual Persian bullets; `background_persian`: 1-2 sentences of context only if supported by the text.
        - `image_alt_persian`: If `has_image` is true, write a 1-sentence descriptive Persian explanation of what the image/artwork represents for blind screen-reader users.
        - `av_transcript_summary_persian`: If `has_video_or_audio` is true (or news is about a trailer/podcast/showcase), write a concise Persian text transcript/summary of the video/audio content for deaf users.
     5. PRODUCT & HYPE LINKING (`related_game` & `is_new_game_release`):
@@ -1675,6 +1493,8 @@ async def process_and_publish_batch(
        - If about EA SPORTS FC 27 / FC 26, set `related_game` = "EA SPORTS FC 27".
        - For any other specific video game, put its exact canonical English title in `related_game`.
        - Set `is_new_game_release` = true if the news announces a new game release or pre-order.
+    6. VIDEO NEWS: Prefer candidates with `has_video_or_audio` = true (trailers, showcases, announcements) whenever they are newsworthy.
+    7. PERSIAN STYLE: Use ی/ک فارسی (not ي/ك), keep game/product/company names in English, use established Persian terms where common, and avoid vague or generic wording.
     """
 
     validated_result = await generate_news_with_fallback(prompt)
@@ -1688,77 +1508,43 @@ async def process_and_publish_batch(
     selected_ids = {sel.selected_id for sel in selected_items if sel.selected_id in batch_map}
     non_selected_ids = [item['id'] for item in current_batch if item['id'] not in selected_ids]
 
-    # تغییر وضعیت در دیتابیس قبل از شروع ارسال
     if selected_ids:
         update_news_status(list(selected_ids), 'selected')
     if not breaking_only and non_selected_ids:
         update_news_status(non_selected_ids, 'rejected')
 
+    selected_items = await extras.enrich_selected_items(session, selected_items, batch_map)
+
     tehran_hour = datetime.now(ZoneInfo("Asia/Tehran")).hour
     silent_mode = (0 <= tehran_hour < 8) and not breaking_only
+    memes_posted = 0
 
     for sel in selected_items:
         orig_item = batch_map.get(sel.selected_id)
         if not orig_item:
             continue
 
+        extras.polish_selected(sel)
         cat_id = sel.category_id if sel.category_id in CATEGORY_HASHTAGS else orig_item.get('category', 'general_news')
         main_cat_hashtag = CATEGORY_HASHTAGS.get(cat_id, "#اخبار")
-        final_caption = format_accessible_news_post(sel, orig_item, main_cat_hashtag)
+        final_caption = extras.format_rich_news_post(sel, orig_item, main_cat_hashtag)
 
         news_link = orig_item.get('link', STORE_BASE_URL)
-        # طراحی دکمه‌های بزرگ، تمام‌عرض و با نام کاملاً واضح برای دسترس‌پذیری حرکتی و نابینایان
+        video_url = extras.pick_video_url(orig_item)
         keyboard = [
             [InlineKeyboardButton("❤️ پسندیدن این خبر (0)", callback_data=f"like_{orig_item['id']}")],
             [InlineKeyboardButton("🔗 مطالعه گزارش کامل در منبع اصلی", url=news_link)]
         ]
-
-        # پیشنهاد محصول مرتبط (فقط در صورت موجود بودن، قابل خرید بودن و ارتباط واقعی)
-        matched_product, custom_btn_label = find_matching_store_product_for_news(
-            related_game=sel.related_game,
-            headline=sel.headline_persian,
-            summary=sel.summary_persian,
-            is_new_release=sel.is_new_game_release
-        )
-        if matched_product:
-            keyboard.append([
-                InlineKeyboardButton(custom_btn_label, url=matched_product['url'])
-            ])
+        if video_url:
+            keyboard.append([InlineKeyboardButton("▶️ تماشای ویدیوی خبر", url=video_url)])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         try:
-            if orig_item.get('image_url'):
-                img_path = await download_image_from_url(session, orig_item['image_url'], f"img_{orig_item['id']}.jpg")
-                if img_path and os.path.exists(img_path):
-                    with open(img_path, 'rb') as photo_file:
-                        await bot.send_photo(
-                            chat_id=TARGET_CHANNEL,
-                            photo=photo_file,
-                            caption=final_caption,
-                            parse_mode="HTML",
-                            reply_markup=reply_markup,
-                            disable_notification=silent_mode
-                        )
-                    os.remove(img_path)
-                else:
-                    await bot.send_message(
-                        chat_id=TARGET_CHANNEL,
-                        text=final_caption,
-                        parse_mode="HTML",
-                        reply_markup=reply_markup,
-                        disable_notification=silent_mode
-                    )
-            else:
-                await bot.send_message(
-                    chat_id=TARGET_CHANNEL,
-                    text=final_caption,
-                    parse_mode="HTML",
-                    reply_markup=reply_markup,
-                    disable_notification=silent_mode
-                )
-
-            # تنها پس از ارسال موفق، خبر وضعیت published می‌گیرد
+            news_msg = await extras.send_post(
+                session, final_caption, image_url=orig_item.get('image_url'),
+                reply_markup=reply_markup, silent=silent_mode, filename=f"img_{orig_item['id']}.jpg"
+            )
             save_published_news_details(
                 item_id=orig_item['id'],
                 fingerprint=sel.topic_fingerprint,
@@ -1767,10 +1553,16 @@ async def process_and_publish_batch(
                 related_entity=sel.related_game,
                 ai_payload=sel.model_dump()
             )
-
-            # ثبت در جدول رویدادهای هایپ زمان‌دار
+            extras.remember_news_message(orig_item['id'], news_msg.message_id)
             if sel.related_game:
                 record_hype_event(sel.related_game, cat_id, float(sel.hype_score))
+
+            if video_url:
+                await extras.send_video_reply(video_url, news_msg.message_id, silent_mode)
+            if (not silent_mode and memes_posted < extras.MEME_MAX_PER_CYCLE
+                    and (sel.hype_score >= extras.MEME_MIN_HYPE or cat_id == "fun_meme")):
+                if await extras.post_meme_reply_for_news(session, sel, news_msg.message_id):
+                    memes_posted += 1
 
             await asyncio.sleep(4)
 
@@ -1784,7 +1576,6 @@ async def publish_daily_digest_if_due():
     now_tehran = datetime.now(tehran_tz)
     today_str = now_tehran.strftime("%Y-%m-%d")
 
-    # اجرا در بازه ساعت ۰۰:۰۰ تا ۰۰:۲۰ بامداد به وقت تهران (یک‌بار در هر شبانه‌روز)
     if now_tehran.hour != 0 or now_tehran.minute > 20:
         return
     if get_metadata("last_daily_digest_date") == today_str:
@@ -1850,7 +1641,7 @@ async def publish_daily_digest_if_due():
 
     digest_lines.append("🚀 <b>داغ‌ترین ترندهای امروز و محورهای خبری فردا:</b>")
     digest_lines.append(f"• بیشترین رشد خبری ۲۴ ساعت اخیر: <b>{' | '.join(trend_names)}</b>")
-    digest_lines.append("• فردا در جاذبه استور: پوشش ادامه رویدادهای مرتبط با این عناوین و بررسی تغییرات قیمت اکانت‌ها و اشتراک‌ها.")
+    digest_lines.append("• فردا در جاذبه استور: پوشش ادامه رویدادهای مرتبط با این عناوین و مهم‌ترین تحولات دنیای گیمینگ و تکنولوژی.")
     digest_lines.append(f"\n🏷 #خلاصه_روزانه #Daily_Digest #گیمینگ #تکنولوژی{CHANNEL_SIGNATURE}")
 
     try:
@@ -1899,15 +1690,22 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def background_news_loop(app_bot):
     init_db()
-    print("🚀 24/7 Accessible News, Breaking Queue, Trend Engine & Digital Store Bot is running...")
+    extras.configure(
+        bot=bot, channel=TARGET_CHANNEL, signature=CHANNEL_SIGNATURE, db_path=DB_PATH,
+        get_metadata=get_metadata, set_metadata=set_metadata,
+        sanitize=sanitize_telegram_html, download_image=download_image_from_url,
+        generate_batch=generate_news_with_fallback, detect_24h_trends=detect_24h_trends,
+        category_names=CATEGORY_PERSIAN_NAMES, series_headers=SERIALIZED_SERIES_HEADERS,
+        gemini_keys=GEMINI_API_KEYS, gemini_models=GEMINI_MODELS,
+        groq_keys=GROQ_API_KEYS, openrouter_keys=OPENROUTER_API_KEYS,
+    )
+    print("🚀 24/7 Accessible News, Breaking Queue, Trend Engine & Extras Bot is running...")
     tehran_tz = ZoneInfo("Asia/Tehran")
 
     await asyncio.sleep(15)
 
     last_regular_cycle_ts = 0.0
-    last_catalog_refresh_ts = 0.0
 
-    # استفاده از یک ClientSession بهینه در هر نوبت کاری
     while True:
         try:
             now_ts = datetime.now(timezone.utc).timestamp()
@@ -1918,10 +1716,8 @@ async def background_news_loop(app_bot):
                 # ۱. بررسی و انتشار گزارش روزانه (Daily Digest) در ساعت ۰۰:۰۰ تهران
                 await publish_daily_digest_if_due()
 
-                # ۲. بروزرسانی کامل کاتالوگ محصولات دیجیتالی سایت در بدو شروع و هر ۲ ساعت یک‌بار
-                if (now_ts - last_catalog_refresh_ts) >= 7200:
-                    await refresh_digital_products_catalog(shared_session)
-                    last_catalog_refresh_ts = now_ts
+                # ۲. اجرای کارهای روزانه افزونه (برداشتن پین‌های قبلی، قیمت دلار ساعت ۱۱ + شعر سعدی، فیلم و موسیقی روزانه ساعت ۱۲)
+                await extras.run_daily_jobs(shared_session)
 
                 # ۳. دریافت فیدهای RSS و خوشه‌بندی معنایی (Semantic Deduplication)
                 await fetch_rss_sources(shared_session)
@@ -1934,7 +1730,7 @@ async def background_news_loop(app_bot):
                         breaking_only=False,
                         max_items=MAX_NEWS_PER_CYCLE
                     )
-                    await publish_weighted_digital_products(shared_session)
+                    await extras.publish_trending_meme(shared_session)
                     last_regular_cycle_ts = now_ts
                 else:
                     # در فواصل ۳ دقیقه‌ای بین دو چرخه، اگر خبر فوری (Breaking News) کشف شد، بلافاصله منتشر شود
