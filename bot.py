@@ -5,6 +5,7 @@ import os
 import json
 import math
 import html
+import time
 import random
 import statistics
 import aiohttp
@@ -18,7 +19,7 @@ from pydantic import BaseModel, Field, ValidationError
 from google import genai
 from google.genai import types
 from openai import AsyncOpenAI
-from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from telegram.ext import Application, CallbackQueryHandler, ContextTypes
 
 try:
@@ -45,11 +46,11 @@ NAVASAN_API_KEY = os.environ.get("NAVASAN_API_KEY", "")
 BRSAPI_KEY = os.environ.get("BRSAPI_KEY", "")
 
 TARGET_CHANNEL = '@jazebestore'
-STORE_BASE_URL = '[https://jazebestore.com](https://jazebestore.com)'
+STORE_BASE_URL = 'https://jazebestore.com'
 CHANNEL_SIGNATURE = "\n\n🎮 @jazebestore"
 DB_PATH = 'rss_news_history.db'
 
-# تنظیمات زمانی: بررسی اخبار فوری هر ۳ دقیقه | چرخه کامل هر ۳۰ دقیقه | حداکثر ۳۵ کاندیدا در هر پرامپت (زیر سقف 7000 توکن Groq)
+# تنظیمات زمانی: بررسی اخبار فوری هر ۳ دقیقه | چرخه کامل هر ۳۰ دقیقه | حداکثر ۳۵ کاندیدا در هر پرامپت
 BREAKING_CHECK_INTERVAL_SECONDS = 180
 REGULAR_CYCLE_SECONDS = 1800
 MAX_NEWS_PER_CYCLE = 12
@@ -79,8 +80,7 @@ MEME_SUBREDDITS = {
     "movies", "television", "music", "bitcoin", "cryptocurrency", "apple", "iphone", "android", "gamephysics",
 }
 
-# مدل‌های فعال و به‌روز برای هر سه سرویس API
-GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-3.8-flash', 'gemini-3.5-flash-lite']
+GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash-lite']
 GROQ_MODELS = ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b', 'openai/gpt-oss-20b']
 OPENROUTER_MODELS = ['meta-llama/llama-3.3-70b-instruct:free', 'google/gemma-3-27b-it:free', 'openrouter/free']
 GEMINI_EMBEDDING_MODEL = 'text-embedding-004'
@@ -127,126 +127,126 @@ BREAKING_TRIGGER_KEYWORDS = [
 
 CATEGORIZED_RSS_SOURCES = {
     "gaming": [
-        "[https://www.ign.com/rss/v2/articles/feed](https://www.ign.com/rss/v2/articles/feed)",
-        "[https://feeds.feedburner.com/ign/news](https://feeds.feedburner.com/ign/news)",
-        "[https://feeds.feedburner.com/ign/reviews](https://feeds.feedburner.com/ign/reviews)",
-        "[https://feeds.feedburner.com/ign/games-all](https://feeds.feedburner.com/ign/games-all)",
-        "[https://www.gamespot.com/feeds/mashup/](https://www.gamespot.com/feeds/mashup/)",
-        "[https://www.eurogamer.net/?format=rss](https://www.eurogamer.net/?format=rss)",
-        "[https://www.videogameschronicle.com/feed/](https://www.videogameschronicle.com/feed/)",
-        "[https://www.pcgamer.com/feeds.xml](https://www.pcgamer.com/feeds.xml)",
-        "[https://www.polygon.com/rss/index.xml](https://www.polygon.com/rss/index.xml)",
-        "[https://kotaku.com/rss](https://kotaku.com/rss)",
-        "[https://www.rockpapershotgun.com/feed](https://www.rockpapershotgun.com/feed)",
-        "[https://www.gamesindustry.biz/feed](https://www.gamesindustry.biz/feed)",
-        "[https://www.gematsu.com/feed](https://www.gematsu.com/feed)",
-        "[https://www.pushsquare.com/feeds/latest](https://www.pushsquare.com/feeds/latest)",
-        "[https://www.purexbox.com/feeds/latest](https://www.purexbox.com/feeds/latest)",
-        "[https://www.nintendolife.com/feeds/latest](https://www.nintendolife.com/feeds/latest)",
-        "[https://www.gamedeveloper.com/rss.xml](https://www.gamedeveloper.com/rss.xml)",
-        "[https://blog.playstation.com/feed/](https://blog.playstation.com/feed/)",
-        "[https://news.xbox.com/en-us/feed/](https://news.xbox.com/en-us/feed/)",
-        "[https://www.zoomg.ir/feed/](https://www.zoomg.ir/feed/)",
-        "[https://vigiato.net/feed](https://vigiato.net/feed)",
-        "[https://gamefa.com/feed](https://gamefa.com/feed)"
+        "https://www.ign.com/rss/v2/articles/feed",
+        "https://feeds.feedburner.com/ign/news",
+        "https://feeds.feedburner.com/ign/reviews",
+        "https://feeds.feedburner.com/ign/games-all",
+        "https://www.gamespot.com/feeds/mashup/",
+        "https://www.eurogamer.net/?format=rss",
+        "https://www.videogameschronicle.com/feed/",
+        "https://www.pcgamer.com/feeds.xml",
+        "https://www.polygon.com/rss/index.xml",
+        "https://kotaku.com/rss",
+        "https://www.rockpapershotgun.com/feed",
+        "https://www.gamesindustry.biz/feed",
+        "https://www.gematsu.com/feed",
+        "https://www.pushsquare.com/feeds/latest",
+        "https://www.purexbox.com/feeds/latest",
+        "https://www.nintendolife.com/feeds/latest",
+        "https://www.gamedeveloper.com/rss.xml",
+        "https://blog.playstation.com/feed/",
+        "https://news.xbox.com/en-us/feed/",
+        "https://www.zoomg.ir/feed/",
+        "https://vigiato.net/feed",
+        "https://gamefa.com/feed"
     ],
     "technology": [
-        "[https://www.theverge.com/rss/index.xml](https://www.theverge.com/rss/index.xml)",
-        "[https://www.theverge.com/rss/tech/index.xml](https://www.theverge.com/rss/tech/index.xml)",
-        "[https://feeds.arstechnica.com/arstechnica/index](https://feeds.arstechnica.com/arstechnica/index)",
-        "[https://www.wired.com/feed/rss](https://www.wired.com/feed/rss)",
-        "[https://techcrunch.com/feed/](https://techcrunch.com/feed/)",
-        "[https://techcrunch.com/category/artificial-intelligence/feed/](https://techcrunch.com/category/artificial-intelligence/feed/)",
-        "[https://www.engadget.com/rss.xml](https://www.engadget.com/rss.xml)",
-        "[https://www.cnet.com/rss/news/](https://www.cnet.com/rss/news/)",
-        "[https://www.techradar.com/feeds.xml](https://www.techradar.com/feeds.xml)",
-        "[https://gizmodo.com/feed](https://gizmodo.com/feed)",
-        "[https://mashable.com/feeds/rss/all](https://mashable.com/feeds/rss/all)",
-        "[https://www.techmeme.com/feed.xml](https://www.techmeme.com/feed.xml)",
-        "[https://feeds.macrumors.com/MacRumors-All](https://feeds.macrumors.com/MacRumors-All)",
-        "[https://9to5mac.com/feed/](https://9to5mac.com/feed/)",
-        "[https://www.zoomit.ir/feed/](https://www.zoomit.ir/feed/)",
-        "[https://digiato.com/feed](https://digiato.com/feed)"
+        "https://www.theverge.com/rss/index.xml",
+        "https://www.theverge.com/rss/tech/index.xml",
+        "https://feeds.arstechnica.com/arstechnica/index",
+        "https://www.wired.com/feed/rss",
+        "https://techcrunch.com/feed/",
+        "https://techcrunch.com/category/artificial-intelligence/feed/",
+        "https://www.engadget.com/rss.xml",
+        "https://www.cnet.com/rss/news/",
+        "https://www.techradar.com/feeds.xml",
+        "https://gizmodo.com/feed",
+        "https://mashable.com/feeds/rss/all",
+        "https://www.techmeme.com/feed.xml",
+        "https://feeds.macrumors.com/MacRumors-All",
+        "https://9to5mac.com/feed/",
+        "https://www.zoomit.ir/feed/",
+        "https://digiato.com/feed"
     ],
     "hardware": [
-        "[https://www.tomshardware.com/feeds/all](https://www.tomshardware.com/feeds/all)",
-        "[https://www.techspot.com/backend.xml](https://www.techspot.com/backend.xml)",
-        "[https://www.notebookcheck.net/RSS-Feed.8156.0.html](https://www.notebookcheck.net/RSS-Feed.8156.0.html)",
-        "[https://www.techpowerup.com/rss/news](https://www.techpowerup.com/rss/news)",
-        "[https://www.youtube.com/feeds/videos.xml?channel_id=UCI8iQa1hv7oV_Z8D35vVuSg](https://www.youtube.com/feeds/videos.xml?channel_id=UCI8iQa1hv7oV_Z8D35vVuSg)",
-        "[https://www.youtube.com/feeds/videos.xml?channel_id=UChIs72whgZI9w6d6FhwGGHA](https://www.youtube.com/feeds/videos.xml?channel_id=UChIs72whgZI9w6d6FhwGGHA)"
+        "https://www.tomshardware.com/feeds/all",
+        "https://www.techspot.com/backend.xml",
+        "https://www.notebookcheck.net/RSS-Feed.8156.0.html",
+        "https://www.techpowerup.com/rss/news",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCI8iQa1hv7oV_Z8D35vVuSg",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UChIs72whgZI9w6d6FhwGGHA"
     ],
     "crypto": [
-        "[https://www.coindesk.com/arc/outboundfeeds/rss/](https://www.coindesk.com/arc/outboundfeeds/rss/)",
-        "[https://cointelegraph.com/rss](https://cointelegraph.com/rss)",
-        "[https://www.theblock.co/rss.xml](https://www.theblock.co/rss.xml)",
-        "[https://decrypt.co/feed](https://decrypt.co/feed)",
-        "[https://bitcoinmagazine.com/feed](https://bitcoinmagazine.com/feed)",
-        "[https://www.dlnews.com/arc/outboundfeeds/rss/](https://www.dlnews.com/arc/outboundfeeds/rss/)",
-        "[https://blockworks.co/feed](https://blockworks.co/feed)",
-        "[https://cryptoslate.com/feed/](https://cryptoslate.com/feed/)",
-        "[https://thedefiant.io/feed](https://thedefiant.io/feed)",
-        "[https://u.today/rss](https://u.today/rss)",
-        "[https://beincrypto.com/feed/](https://beincrypto.com/feed/)",
-        "[https://protos.com/feed](https://protos.com/feed)"
+        "https://www.coindesk.com/arc/outboundfeeds/rss/",
+        "https://cointelegraph.com/rss",
+        "https://www.theblock.co/rss.xml",
+        "https://decrypt.co/feed",
+        "https://bitcoinmagazine.com/feed",
+        "https://www.dlnews.com/arc/outboundfeeds/rss/",
+        "https://blockworks.co/feed",
+        "https://cryptoslate.com/feed/",
+        "https://thedefiant.io/feed",
+        "https://u.today/rss",
+        "https://beincrypto.com/feed/",
+        "https://protos.com/feed"
     ],
     "film_tv": [
-        "[https://variety.com/feed/](https://variety.com/feed/)",
-        "[https://variety.com/v/film/feed/](https://variety.com/v/film/feed/)",
-        "[https://variety.com/v/tv/feed/](https://variety.com/v/tv/feed/)",
-        "[https://variety.com/v/music/feed/](https://variety.com/v/music/feed/)",
-        "[https://www.hollywoodreporter.com/feed/](https://www.hollywoodreporter.com/feed/)",
-        "[https://deadline.com/feed/](https://deadline.com/feed/)",
-        "[https://www.indiewire.com/feed/](https://www.indiewire.com/feed/)",
-        "[https://www.thewrap.com/feed/](https://www.thewrap.com/feed/)",
-        "[https://collider.com/feed/](https://collider.com/feed/)",
-        "[https://screenrant.com/feed/](https://screenrant.com/feed/)",
-        "[https://www.rogerebert.com/feed](https://www.rogerebert.com/feed)",
-        "[https://www.avclub.com/rss](https://www.avclub.com/rss)",
-        "[https://consequence.net/feed/](https://consequence.net/feed/)",
-        "[https://www.slashfilm.com/feed/](https://www.slashfilm.com/feed/)",
-        "[https://www.denofgeek.com/feed/](https://www.denofgeek.com/feed/)",
-        "[https://bloody-disgusting.com/feed/](https://bloody-disgusting.com/feed/)"
+        "https://variety.com/feed/",
+        "https://variety.com/v/film/feed/",
+        "https://variety.com/v/tv/feed/",
+        "https://variety.com/v/music/feed/",
+        "https://www.hollywoodreporter.com/feed/",
+        "https://deadline.com/feed/",
+        "https://www.indiewire.com/feed/",
+        "https://www.thewrap.com/feed/",
+        "https://collider.com/feed/",
+        "https://screenrant.com/feed/",
+        "https://www.rogerebert.com/feed",
+        "https://www.avclub.com/rss",
+        "https://consequence.net/feed/",
+        "https://www.slashfilm.com/feed/",
+        "https://www.denofgeek.com/feed/",
+        "https://bloody-disgusting.com/feed/"
     ],
     "internet_culture": [
-        "[https://knowyourmeme.com/newsfeed.rss](https://knowyourmeme.com/newsfeed.rss)",
-        "[https://knowyourmeme.com/editorials.rss](https://knowyourmeme.com/editorials.rss)",
-        "[https://www.tmz.com/rss.xml](https://www.tmz.com/rss.xml)",
-        "[https://www.buzzfeed.com/index.xml](https://www.buzzfeed.com/index.xml)",
-        "[https://www.dexerto.com/feed/](https://www.dexerto.com/feed/)",
-        "[https://www.complex.com/feed/](https://www.complex.com/feed/)",
-        "[https://www.thedailybeast.com/feed](https://www.thedailybeast.com/feed)",
-        "[https://www.vulture.com/rss/index.xml](https://www.vulture.com/rss/index.xml)",
-        "[https://www.themarysue.com/feed/](https://www.themarysue.com/feed/)"
+        "https://knowyourmeme.com/newsfeed.rss",
+        "https://knowyourmeme.com/editorials.rss",
+        "https://www.tmz.com/rss.xml",
+        "https://www.buzzfeed.com/index.xml",
+        "https://www.dexerto.com/feed/",
+        "https://www.complex.com/feed/",
+        "https://www.thedailybeast.com/feed",
+        "https://www.vulture.com/rss/index.xml",
+        "https://www.themarysue.com/feed/"
     ],
     "music": [
-        "[https://www.billboard.com/feed/](https://www.billboard.com/feed/)",
-        "[https://www.rollingstone.com/feed/](https://www.rollingstone.com/feed/)",
-        "[https://pitchfork.com/feed/feed-news/rss](https://pitchfork.com/feed/feed-news/rss)",
-        "[https://pitchfork.com/feed/feed-album-reviews/rss](https://pitchfork.com/feed/feed-album-reviews/rss)",
-        "[https://www.stereogum.com/feed/](https://www.stereogum.com/feed/)",
-        "[https://www.nme.com/feed](https://www.nme.com/feed)",
-        "[https://www.musicbusinessworldwide.com/feed/](https://www.musicbusinessworldwide.com/feed/)",
-        "[https://www.thefader.com/rss](https://www.thefader.com/rss)",
-        "[https://feeds.npr.org/1039/rss.xml](https://feeds.npr.org/1039/rss.xml)",
-        "[https://www.digitalmusicnews.com/feed/](https://www.digitalmusicnews.com/feed/)",
-        "[https://musictech.com/feed/](https://musictech.com/feed/)",
-        "[https://ra.co/xml](https://ra.co/xml)",
-        "[https://www.spin.com/feed/](https://www.spin.com/feed/)"
+        "https://www.billboard.com/feed/",
+        "https://www.rollingstone.com/feed/",
+        "https://pitchfork.com/feed/feed-news/rss",
+        "https://pitchfork.com/feed/feed-album-reviews/rss",
+        "https://www.stereogum.com/feed/",
+        "https://www.nme.com/feed",
+        "https://www.musicbusinessworldwide.com/feed/",
+        "https://www.thefader.com/rss",
+        "https://feeds.npr.org/1039/rss.xml",
+        "https://www.digitalmusicnews.com/feed/",
+        "https://musictech.com/feed/",
+        "https://ra.co/xml",
+        "https://www.spin.com/feed/"
     ],
     "general_news": [
-        "[https://feeds.bbci.co.uk/news/rss.xml](https://feeds.bbci.co.uk/news/rss.xml)",
-        "[https://feeds.bbci.co.uk/news/technology/rss.xml](https://feeds.bbci.co.uk/news/technology/rss.xml)",
-        "[https://www.theguardian.com/world/rss](https://www.theguardian.com/world/rss)",
-        "[https://feeds.npr.org/1001/rss.xml](https://feeds.npr.org/1001/rss.xml)",
-        "[https://www.aljazeera.com/xml/rss/all.xml](https://www.aljazeera.com/xml/rss/all.xml)",
-        "[https://www.bloomberg.com/feeds/news.rss](https://www.bloomberg.com/feeds/news.rss)",
-        "[https://www.bloomberg.com/feeds/markets/news.rss](https://www.bloomberg.com/feeds/markets/news.rss)",
-        "[https://www.ft.com/rss/home/international](https://www.ft.com/rss/home/international)",
-        "[https://www.cnbc.com/id/100003114/device/rss/rss.html](https://www.cnbc.com/id/100003114/device/rss/rss.html)",
-        "[https://www.economist.com/finance-and-economics/rss.xml](https://www.economist.com/finance-and-economics/rss.xml)",
-        "[https://news.google.com/rss/search?q=site%3Areuters.com&hl=en-US&gl=US&ceid=US:en](https://news.google.com/rss/search?q=site%3Areuters.com&hl=en-US&gl=US&ceid=US:en)",
-        "[https://news.google.com/rss/search?q=site%3Aapnews.com&hl=en-US&gl=US&ceid=US:en](https://news.google.com/rss/search?q=site%3Aapnews.com&hl=en-US&gl=US&ceid=US:en)"
+        "https://feeds.bbci.co.uk/news/rss.xml",
+        "https://feeds.bbci.co.uk/news/technology/rss.xml",
+        "https://www.theguardian.com/world/rss",
+        "https://feeds.npr.org/1001/rss.xml",
+        "https://www.aljazeera.com/xml/rss/all.xml",
+        "https://www.bloomberg.com/feeds/news.rss",
+        "https://www.bloomberg.com/feeds/markets/news.rss",
+        "https://www.ft.com/rss/home/international",
+        "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+        "https://www.economist.com/finance-and-economics/rss.xml",
+        "https://news.google.com/rss/search?q=site%3Areuters.com&hl=en-US&gl=US&ceid=US:en",
+        "https://news.google.com/rss/search?q=site%3Aapnews.com&hl=en-US&gl=US&ceid=US:en"
     ]
 }
 
@@ -563,7 +563,7 @@ def detect_24h_trends(top_n: int = 8) -> list[dict]:
     conn.close()
     return [{"entity": r[0], "mentions": r[1], "score": round(r[2], 1)} for r in rows]
 
-# ================= ۶. توابع پاک‌سازی، Sanitization HTML و ارسال امن =================
+# ================= ۶. توابع پاک‌سازی، Sanitization HTML و ارسال یکپارچه (بدون تکرار) =================
 def clean_raw_text(text: str) -> str:
     if not text:
         return ""
@@ -672,18 +672,6 @@ def _fit_lines(text: str, limit: int) -> str:
         kept.append(line)
     return "\n".join(kept + [tail])
 
-def _short_caption(text: str, limit: int = 260) -> str:
-    kept = []
-    for line in text.split("\n"):
-        if not line.strip():
-            if kept:
-                break
-            continue
-        if kept and _visible_len("\n".join(kept + [line])) > limit:
-            break
-        kept.append(line)
-    return "\n".join(kept)
-
 def _reply_kwargs(message_id):
     if not message_id:
         return {}
@@ -693,50 +681,72 @@ def _reply_kwargs(message_id):
 
 async def send_post(session, text, image_url=None, reply_markup=None, silent=False,
                     reply_to=None, filename="post.jpg", link_preview=False):
+    """
+    ارسال تضمینی در قالب یک پست واحد (بدون شکستن به دو پیام و بدون تکرار تیتر):
+    - اگر متن زیر ۱۰۰۰ کاراکتر باشد، مستقیماً با send_photo ارسال می‌شود.
+    - اگر متن بالای ۱۰۰۰ کاراکتر باشد، به صورت یک پیام واحد با نمایش بزرگ تصویر در بالای متن (LinkPreviewOptions) منتشر می‌شود.
+    """
     text = _fit_lines(text, 4000)
 
-    async def send_text(body, parse_mode, markup, reply_id):
+    async def send_text_single(body, parse_mode, markup, reply_id, media_url=None):
+        preview_opts = None
+        if media_url:
+            preview_opts = LinkPreviewOptions(
+                is_disabled=False,
+                url=media_url,
+                prefer_large_media=True,
+                show_above_text=True
+            )
         return await bot.send_message(
-            chat_id=TARGET_CHANNEL, text=body, parse_mode=parse_mode, reply_markup=markup,
-            disable_notification=silent, disable_web_page_preview=not link_preview,
-            **_reply_kwargs(reply_id))
+            chat_id=TARGET_CHANNEL,
+            text=body,
+            parse_mode=parse_mode,
+            reply_markup=markup,
+            disable_notification=silent,
+            disable_web_page_preview=(not link_preview and not media_url),
+            link_preview_options=preview_opts,
+            **_reply_kwargs(reply_id)
+        )
 
-    async def send_photo(path, caption, parse_mode, markup, reply_id):
+    async def send_photo_single(path, caption, parse_mode, markup, reply_id):
         with open(path, "rb") as fh:
             return await bot.send_photo(
-                chat_id=TARGET_CHANNEL, photo=fh, caption=caption, parse_mode=parse_mode, reply_markup=markup,
-                disable_notification=silent, **_reply_kwargs(reply_id))
+                chat_id=TARGET_CHANNEL,
+                photo=fh,
+                caption=caption,
+                parse_mode=parse_mode,
+                reply_markup=markup,
+                disable_notification=silent,
+                **_reply_kwargs(reply_id)
+            )
 
-    img_path = None
-    if image_url:
+    # ۱. برای کپشن‌های زیر ۱۰۰۰ کاراکتر: ارسال مستقیم عکس و متن یکجا
+    if image_url and _visible_len(text) <= 1000:
         img_path = await download_image_from_url(session, image_url, filename)
-    try:
-        async def attempt(body, parse_mode):
+        try:
             if img_path and os.path.exists(img_path):
                 try:
-                    if _visible_len(body) <= 1000:
-                        return await send_photo(img_path, body, parse_mode, reply_markup, reply_to)
-                    photo_msg = await send_photo(img_path, _short_caption(body), parse_mode, None, reply_to)
-                    return await send_text(body, parse_mode, reply_markup, photo_msg.message_id)
+                    return await send_photo_single(img_path, text, "HTML", reply_markup, reply_to)
                 except Exception as photo_err:
                     if "entities" in str(photo_err).lower() or "parse" in str(photo_err).lower():
-                        raise
-                    print(f"⚠️ ارسال عکس ناموفق بود، ارسال متنی: {photo_err}")
-            return await send_text(body, parse_mode, reply_markup, reply_to)
+                        return await send_photo_single(img_path, _strip_tags(text), None, reply_markup, reply_to)
+                    print(f"⚠️ ارسال مستقیم عکس ناموفق بود، ارسال با پیش‌نمایش بزرگ: {photo_err}")
+        finally:
+            if img_path and os.path.exists(img_path):
+                try:
+                    os.remove(img_path)
+                except OSError:
+                    pass
 
-        try:
-            return await attempt(text, "HTML")
-        except Exception as err:
-            if "entities" in str(err).lower() or "parse" in str(err).lower():
-                print("⚠️ خطای HTML؛ ارسال نسخه‌ی متن ساده.")
-                return await attempt(_strip_tags(text), None)
-            raise
-    finally:
-        if img_path and os.path.exists(img_path):
-            try:
-                os.remove(img_path)
-            except OSError:
-                pass
+    # ۲. برای خبرهای مفصل (بالای ۱۰۰۰ کاراکتر) یا زمانی که فایل عکس دانلود نشد: یک پست واحد با تصویر بزرگ در بالای متن
+    try:
+        return await send_text_single(text, "HTML", reply_markup, reply_to, media_url=image_url)
+    except Exception as err:
+        err_low = str(err).lower()
+        if "entities" in err_low or "parse" in err_low:
+            return await send_text_single(_strip_tags(text), None, reply_markup, reply_to, media_url=image_url)
+        # اگر لینک تصویر در پیش‌نمایش پذیرفته نشد، به‌صورت متنی ارسال شود
+        return await send_text_single(text, "HTML", reply_markup, reply_to, media_url=None)
 
 # ================= ۷. پین کردن تا ۰۰:۰۰ =================
 def _pins_load() -> list:
@@ -838,7 +848,6 @@ def _extract_json_from_llm_content(raw_content: str | None) -> dict:
     if cleaned.startswith("```"):
         cleaned = re.sub(r'^```(?:json)?\s*', '', cleaned)
         cleaned = re.sub(r'\s*```$', '', cleaned).strip()
-    # استخراج اولین بلوک JSON معتبر در صورت وجود متن اضافی در ابتدا یا انتها
     start = cleaned.find("{")
     end = cleaned.rfind("}")
     if start != -1 and end != -1 and end > start:
@@ -877,7 +886,7 @@ async def call_gemini_provider(prompt: str) -> BatchProcessResult | None:
 
 async def call_groq_provider(prompt: str) -> BatchProcessResult | None:
     for key_idx, groq_key in enumerate(GROQ_API_KEYS, start=1):
-        groq_client = AsyncOpenAI(api_key=groq_key, base_url="https://api.groq.com/openai/v1")
+        groq_client = AsyncOpenAI(api_key=groq_key, base_url="[https://api.groq.com/openai/v1](https://api.groq.com/openai/v1)")
         for model_name in GROQ_MODELS:
             for attempt in range(1, 3):
                 try:
@@ -907,12 +916,11 @@ async def call_groq_provider(prompt: str) -> BatchProcessResult | None:
 
 async def call_openrouter_provider(prompt: str) -> BatchProcessResult | None:
     for key_idx, or_key in enumerate(OPENROUTER_API_KEYS, start=1):
-        or_client = AsyncOpenAI(api_key=or_key, base_url="https://openrouter.ai/api/v1")
+        or_client = AsyncOpenAI(api_key=or_key, base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)")
         for model_name in OPENROUTER_MODELS:
             for attempt in range(1, 3):
                 try:
                     print(f"تلاش با OpenRouter (کلید #{key_idx} | مدل: {model_name} | نوبت {attempt})...")
-                    # عدم ارسال اجباری response_format در OpenRouter برای جلوگیری از بازگشت None در مدل‌های رایگان
                     completion = await or_client.chat.completions.create(
                         model=model_name,
                         messages=[
@@ -992,8 +1000,8 @@ async def ask_ai_json(prompt: str, model_cls, temperature: float = 0.5):
 
     backends = [
         gemini_fn,
-        lambda: openai_compat(GROQ_API_KEYS, "https://api.groq.com/openai/v1", GROQ_MODELS, True),
-        lambda: openai_compat(OPENROUTER_API_KEYS, "https://openrouter.ai/api/v1", OPENROUTER_MODELS, False),
+        lambda: openai_compat(GROQ_API_KEYS, "[https://api.groq.com/openai/v1](https://api.groq.com/openai/v1)", GROQ_MODELS, True),
+        lambda: openai_compat(OPENROUTER_API_KEYS, "[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)", OPENROUTER_MODELS, False),
     ]
     start = _extra_ai_rot % 3
     _extra_ai_rot += 1
@@ -1028,10 +1036,10 @@ def _extract_beit(poem: dict):
     m1, m2 = random.choice(pairs)
     return {"m1": persian_polish(m1), "m2": persian_polish(m2),
             "title": poem.get("fullTitle") or "دیوان سعدی",
-            "url": "https://ganjoor.net" + full_url}
+            "url": "[https://ganjoor.net](https://ganjoor.net)" + full_url}
 
 async def fetch_saadi_verse(session) -> dict:
-    base = "https://api.ganjoor.net/api/ganjoor"
+    base = "[https://api.ganjoor.net/api/ganjoor](https://api.ganjoor.net/api/ganjoor)"
     try:
         poet_id = get_metadata("ganjoor_saadi_id", "")
         if not poet_id:
@@ -1058,13 +1066,13 @@ async def fetch_saadi_verse(session) -> dict:
     except Exception as e:
         print(f"⚠️ دریافت شعر از گنجور ناموفق: {e}")
     m1, m2, title = random.choice(FALLBACK_VERSES)
-    return {"m1": m1, "m2": m2, "title": title, "url": "https://ganjoor.net/saadi/"}
+    return {"m1": m1, "m2": m2, "title": title, "url": "[https://ganjoor.net/saadi/](https://ganjoor.net/saadi/)"}
 
 def _usd_ok(v) -> bool:
     return isinstance(v, int) and 20_000 <= v <= 3_000_000
 
 async def _usd_tgju(session):
-    for url in ("https://call5.tgju.org/ajax.json", "https://call4.tgju.org/ajax.json"):
+    for url in ("[https://call5.tgju.org/ajax.json](https://call5.tgju.org/ajax.json)", "[https://call4.tgju.org/ajax.json](https://call4.tgju.org/ajax.json)"):
         try:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
                 if resp.status != 200:
@@ -1078,7 +1086,7 @@ async def _usd_tgju(session):
 
 async def _usd_alanchand(session):
     try:
-        async with session.get("https://alanchand.com/currencies-price/usd", timeout=aiohttp.ClientTimeout(total=15), headers=UA) as resp:
+        async with session.get("[https://alanchand.com/currencies-price/usd](https://alanchand.com/currencies-price/usd)", timeout=aiohttp.ClientTimeout(total=15), headers=UA) as resp:
             if resp.status != 200:
                 return None
             page = await resp.text()
@@ -1092,7 +1100,7 @@ async def _usd_navasan(session):
     if not NAVASAN_API_KEY:
         return None
     try:
-        url = f"http://api.navasan.tech/latest/?api_key={NAVASAN_API_KEY}&item=usd_sell"
+        url = f"[http://api.navasan.tech/latest/?api_key=](http://api.navasan.tech/latest/?api_key=){NAVASAN_API_KEY}&item=usd_sell"
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
             data = await resp.json(content_type=None)
         return int(float(to_en_digits(data["usd_sell"]["value"]).replace(",", "")))
@@ -1103,7 +1111,7 @@ async def _usd_brsapi(session):
     if not BRSAPI_KEY:
         return None
     try:
-        url = f"https://brsapi.ir/Api/Market/Gold_Currency.php?key={BRSAPI_KEY}"
+        url = f"[https://brsapi.ir/Api/Market/Gold_Currency.php?key=](https://brsapi.ir/Api/Market/Gold_Currency.php?key=){BRSAPI_KEY}"
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
             data = await resp.json(content_type=None)
         for item in data.get("currency", []):
@@ -1264,7 +1272,7 @@ async def omdb_lookup(session, title: str, year: int):
     if not OMDB_API_KEY:
         return None
     try:
-        url = f"https://www.omdbapi.com/?apikey={OMDB_API_KEY}&t={quote_plus(title)}&y={year}&type=movie"
+        url = f"[https://www.omdbapi.com/?apikey=](https://www.omdbapi.com/?apikey=){OMDB_API_KEY}&t={quote_plus(title)}&y={year}&type=movie"
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
             data = await resp.json(content_type=None)
         if data.get("Response") != "True":
@@ -1365,13 +1373,13 @@ async def publish_daily_recommendation_if_due(session):
     rec, info, genre_key, genre_fa, occasion = result
     text = build_daily_rec_post(rec, info, genre_fa, occasion, current_tehran)
     m, mu = rec.movie, rec.music
-    imdb_url = f"https://www.imdb.com/title/{info['id']}/" if info and info.get("id") else \
-        f"https://www.imdb.com/find/?q={quote_plus(m.title_en + ' ' + str(m.year))}"
+    imdb_url = f"[https://www.imdb.com/title/](https://www.imdb.com/title/){info['id']}/" if info and info.get("id") else \
+        f"[https://www.imdb.com/find/?q=](https://www.imdb.com/find/?q=){quote_plus(m.title_en + ' ' + str(m.year))}"
     music_q = quote_plus(f"{mu.artist} {mu.track}")
     markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("🎬 صفحه‌ی فیلم در IMDb", url=imdb_url)],
-        [InlineKeyboardButton("▶️ شنیدن موسیقی در YouTube", url=f"https://www.youtube.com/results?search_query={music_q}")],
-        [InlineKeyboardButton("🎧 جستجو در Spotify", url=f"https://open.spotify.com/search/{music_q}")],
+        [InlineKeyboardButton("▶️ شنیدن موسیقی در YouTube", url=f"[https://www.youtube.com/results?search_query=](https://www.youtube.com/results?search_query=){music_q}")],
+        [InlineKeyboardButton("🎧 جستجو در Spotify", url=f"[https://open.spotify.com/search/](https://open.spotify.com/search/){music_q}")],
     ])
     msg = await send_post(session, text, image_url=(info or {}).get("poster"), reply_markup=markup,
                           filename="daily_rec.jpg")
@@ -1395,7 +1403,7 @@ _NOISE = re.compile(r"cookie|subscribe|newsletter|sign up|all rights reserved|ad
 
 def _youtube_watch_url(url: str) -> str:
     m = re.search(r"youtube\.com/embed/([\w-]{6,})", url)
-    return f"https://www.youtube.com/watch?v={m.group(1)}" if m else url
+    return f"[https://www.youtube.com/watch?v=](https://www.youtube.com/watch?v=){m.group(1)}" if m else url
 
 async def fetch_article_details(session, url: str):
     try:
@@ -1528,7 +1536,7 @@ async def _reddit_candidates(session, query: str) -> list:
     seen = set(_meme_seen())
     out = []
     for period in ("day", "week"):
-        url = f"https://www.reddit.com/search.rss?q={quote_plus(query)}&sort=top&t={period}&limit=25"
+        url = f"[https://www.reddit.com/search.rss?q=](https://www.reddit.com/search.rss?q=){quote_plus(query)}&sort=top&t={period}&limit=25"
         try:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15), headers=REDDIT_UA) as resp:
                 if resp.status != 200:
@@ -2083,7 +2091,16 @@ async def background_news_loop(app_bot):
         await asyncio.sleep(BREAKING_CHECK_INTERVAL_SECONDS)
 
 def main():
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    print("Waiting 20 seconds for old container to shut down cleanly...")
+    time.sleep(20)
+
+    application = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .get_updates_read_timeout(30)
+        .get_updates_connect_timeout(30)
+        .build()
+    )
     application.add_handler(CallbackQueryHandler(button_click_handler))
     application.add_error_handler(error_handler)
 
@@ -2096,7 +2113,7 @@ def main():
     print("Telegram Bot application started (24/7 Unified Mode)...")
     application.run_polling(
         drop_pending_updates=True,
-        allowed_updates=Update.ALL_TYPES,
+        allowed_updates=["callback_query"],
         close_loop=False
     )
 
