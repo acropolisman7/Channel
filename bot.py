@@ -8,7 +8,6 @@ import html
 import time
 import random
 import hashlib
-import statistics
 import aiohttp
 import feedparser
 from typing import Literal
@@ -42,45 +41,39 @@ GEMINI_API_KEYS = [
 
 GROQ_API_KEYS = [k.strip() for k in os.environ.get("GROQ_API_KEYS", "").split(",") if k.strip()]
 OPENROUTER_API_KEYS = [k.strip() for k in os.environ.get("OPENROUTER_API_KEYS", "").split(",") if k.strip()]
-
 OMDB_API_KEY = os.environ.get("OMDB_API_KEY", "")
-NAVASAN_API_KEY = os.environ.get("NAVASAN_API_KEY", "")
-BRSAPI_KEY = os.environ.get("BRSAPI_KEY", "")
 
 TARGET_CHANNEL = '@jazebestore'
 STORE_BASE_URL = 'https://jazebestore.com'
 CHANNEL_SIGNATURE = "\n\n🎮 @jazebestore"
 DB_PATH = 'rss_news_history.db'
 
-# تنظیمات بهینه‌سازی مصرف توکن و جلوگیری از شلوغی کانال
+# تنظیمات زمانی و بهینه‌سازی مصرف توکن
 BREAKING_CHECK_INTERVAL_SECONDS = 300   # بررسی اخبار فوری هر ۵ دقیقه
-REGULAR_CYCLE_SECONDS = 2700          # چرخه عادی هر ۴۵ دقیقه (کاهش ~۳۵٪ مصرف روزانه)
-MAX_NEWS_PER_CYCLE = 5                # حداکثر ۵ خبر دست‌چین در هر چرخه (ساده و بدون شلوغی)
+REGULAR_CYCLE_SECONDS = 2700          # چرخه عادی هر ۴۵ دقیقه
+MAX_NEWS_PER_CYCLE = 5                # حداکثر ۵ خبر دست‌چین در هر چرخه
 MAX_BREAKING_PER_CYCLE = 2            # حداکثر ۲ خبر فوری در هر نوبت
-MAX_CANDIDATES_FOR_AI = 14            # ارسال فقط ۱۴ کاندیدای برتر پس از امتیازدهی محلی
+MAX_CANDIDATES_FOR_AI = 12            # ارسال فقط ۱۲ کاندیدای برتر پس از فیلتر محلی
 SEMANTIC_SIMILARITY_THRESHOLD = 0.78
 CLUSTER_SIMILARITY_THRESHOLD = 0.72
 POLL_MIN_HYPE = 8
 
-# تنظیمات زمان‌بندی پست‌های روزانه
+# سقف‌های روزانه و Cooldown سرویس‌های هوش مصنوعی
+GEMINI_COOLDOWN_SECONDS = 900
+GROQ_DAILY_CALL_LIMIT = 80
+GROQ_DAILY_TOKEN_LIMIT = 220000
+OPENROUTER_DAILY_CALL_LIMIT = 50
+
+# تنظیمات پست‌های روزانه (تقویم + شعر سعدی و پیشنهاد فیلم/موسیقی)
 TEHRAN = ZoneInfo("Asia/Tehran")
-USD_POST_HOUR = 11
-USD_WINDOW_END_HOUR = 24
+CALENDAR_POST_HOUR = 11
+CALENDAR_WINDOW_END_HOUR = 24
 DAILY_REC_HOUR = 12
 DAILY_REC_WINDOW_END_HOUR = 24
-MEME_MAX_PER_CYCLE = 1
-MEME_MIN_HYPE = 7
-MEME_STANDALONE_GAP_MIN = 180
-ARTICLE_MAX_CHARS = 1200
 
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-REDDIT_UA = {"User-Agent": "jazebe-news-bot/1.0"}
-MEME_SUBREDDITS = {
-    "gaming", "memes", "pcmasterrace", "playstation", "ps5", "xbox", "nintendo",
-    "gamingmemes", "dankmemes", "funny", "technology", "movies", "music", "bitcoin"
-}
 
-# لیست مدل‌های جمنای (شامل Hydrogen 4 و سری 3.5 / 3.8)
+# مدل‌های فعال جمنای و پشتیبان‌ها
 GEMINI_MODELS = [
     'gemini-4-hydrogen',
     'gemini-3.8-flash',
@@ -185,7 +178,7 @@ CATEGORIZED_RSS_SOURCES = {
     ]
 }
 
-# ================= ۲. راه‌اندازی دیتابیس و مدیریت وضعیت =================
+# ================= ۲. راه‌اندازی دیتابیس و مدیریت سهمیه =================
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 os.makedirs('temp_media', exist_ok=True)
 provider_rotation_index = 0
@@ -217,13 +210,6 @@ def init_db():
                     discovered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     published_at TIMESTAMP
                 )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS hype_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    entity_name TEXT,
-                    category TEXT,
-                    score REAL DEFAULT 1.0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )''')
     c.execute('''CREATE TABLE IF NOT EXISTS bot_metadata (
                     key TEXT PRIMARY KEY,
                     value TEXT
@@ -245,6 +231,23 @@ def set_metadata(key: str, value: str):
     c.execute("INSERT OR REPLACE INTO bot_metadata (key, value) VALUES (?, ?)", (key, str(value)))
     conn.commit()
     conn.close()
+
+def _get_daily_usage(provider: str) -> tuple[int, int]:
+    today = get_current_tehran_time().strftime("%Y-%m-%d")
+    saved_date = get_metadata(f"usage_date_{provider}", "")
+    if saved_date != today:
+        set_metadata(f"usage_date_{provider}", today)
+        set_metadata(f"usage_calls_{provider}", "0")
+        set_metadata(f"usage_tokens_{provider}", "0")
+        return 0, 0
+    calls = int(get_metadata(f"usage_calls_{provider}", "0") or 0)
+    tokens = int(get_metadata(f"usage_tokens_{provider}", "0") or 0)
+    return calls, tokens
+
+def _record_daily_usage(provider: str, tokens_used: int = 1200):
+    calls, tokens = _get_daily_usage(provider)
+    set_metadata(f"usage_calls_{provider}", str(calls + 1))
+    set_metadata(f"usage_tokens_{provider}", str(tokens + max(0, tokens_used)))
 
 def update_news_status(item_ids: list[int], new_status: str, increment_retry: bool = False):
     if not item_ids:
@@ -482,7 +485,7 @@ async def run_semantic_clustering_and_deduplication():
         conn.commit()
     conn.close()
 
-# ================= ۵. پیش‌فیلتر محلی کاندیداها (کاهش شدید مصرف توکن) =================
+# ================= ۵. پیش‌فیلتر محلی کاندیداها =================
 def score_candidate_locally(item: dict) -> float:
     score = float(item.get('source_count', 1)) * 3.0
     if item.get('is_breaking_candidate'):
@@ -494,35 +497,6 @@ def score_candidate_locally(item: dict) -> float:
         if re.search(rf"(?<![a-z0-9]){re.escape(kw)}(?![a-z0-9])", low_text):
             score += 1.2
     return score
-
-def record_hype_event(entity_name: str, category: str, score: float):
-    if not entity_name or len(entity_name.strip()) < 2:
-        return
-    clean_name = entity_name.strip().lower()
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-        INSERT INTO hype_events (entity_name, category, score, created_at)
-        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-    """, (clean_name, category, float(max(1.0, min(score, 10.0)))))
-    c.execute("DELETE FROM hype_events WHERE created_at < datetime('now', '-7 days')")
-    conn.commit()
-    conn.close()
-
-def detect_24h_trends(top_n: int = 5) -> list[dict]:
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-        SELECT entity_name, COUNT(*) as mentions, SUM(score) as total_score
-        FROM hype_events
-        WHERE created_at >= datetime('now', '-24 hours')
-        GROUP BY entity_name
-        ORDER BY total_score DESC, mentions DESC
-        LIMIT ?
-    """, (top_n,))
-    rows = c.fetchall()
-    conn.close()
-    return [{"entity": r[0], "mentions": r[1], "score": round(r[2], 1)} for r in rows]
 
 # ================= ۶. پاک‌سازی متن، HTML و ارسال یکپارچه =================
 def clean_raw_text(text: str) -> str:
@@ -735,7 +709,7 @@ async def unpin_expired_pins(session=None):
             remaining.append(pin)
     set_metadata("pinned_posts", json.dumps(remaining))
 
-# ================= ۸. Schema فشرده و بهینه (کمترین مصرف توکن خروجی) =================
+# ================= ۸. Schema فشرده و بهینه =================
 VerificationStatusType = Literal["تأیید رسمی", "گزارش رسانه‌ای", "پیش‌بینی تحلیلگران"]
 
 class SelectedNewsItem(BaseModel):
@@ -758,7 +732,7 @@ class SelectedNewsItem(BaseModel):
 class BatchProcessResult(BaseModel):
     selected_news: list[SelectedNewsItem]
 
-# ================= ۹. موتور AI با مدیریت Cooldown سهمیه (429) =================
+# ================= ۹. موتور AI با مدیریت هوشمند Cooldown و سقف روزانه =================
 JSON_SCHEMA_INSTRUCTION = """
 Respond ONLY with valid JSON matching:
 {"selected_news":[{"selected_id":1,"category_id":"gaming","verification_status":"تأیید رسمی","is_breaking":false,"headline_persian":"...","summary_persian":"...","key_points_persian":["...","..."],"poll_question_persian":"","poll_options_persian":[],"topic_hashtags":["#گیمینگ"],"topic_fingerprint":"...","related_game":"","hype_score":7}]}
@@ -782,7 +756,12 @@ def _is_quota_error(err: Exception) -> bool:
     return "429" in s or "resource_exhausted" in s or "quota" in s or "rate limit" in s
 
 async def call_gemini_provider(prompt: str) -> BatchProcessResult | None:
-    if time.time() < _provider_cooldown_until["gemini"]:
+    if not GEMINI_API_KEYS:
+        return None
+    now = time.time()
+    if now < _provider_cooldown_until["gemini"]:
+        rem = int(_provider_cooldown_until["gemini"] - now)
+        print(f"ℹ️ عبور از Gemini: در وضعیت استراحت (Cooldown) تا {rem} ثانیه دیگر")
         return None
     for key_idx, api_key in enumerate(GEMINI_API_KEYS, start=1):
         temp_client = genai.Client(api_key=api_key)
@@ -809,14 +788,21 @@ async def call_gemini_provider(prompt: str) -> BatchProcessResult | None:
             except Exception as e:
                 print(f"⚠️ خطا در Gemini ({model_name}): {e}")
                 if _is_quota_error(e):
-                    _provider_cooldown_until["gemini"] = time.time() + 1800
-                    print("⏸ سهمیه Gemini پر شد؛ استراحت ۳۰ دقیقه‌ای و انتقال به Groq/OpenRouter...")
+                    _provider_cooldown_until["gemini"] = time.time() + GEMINI_COOLDOWN_SECONDS
+                    print(f"⚠️ سهمیه Gemini به سقف رسیده است (Cooldown به مدت {GEMINI_COOLDOWN_SECONDS // 60} دقیقه).")
                     return None
                 await asyncio.sleep(1)
     return None
 
 async def call_groq_provider(prompt: str) -> BatchProcessResult | None:
-    if time.time() < _provider_cooldown_until["groq"]:
+    if not GROQ_API_KEYS:
+        return None
+    now = time.time()
+    if now < _provider_cooldown_until["groq"]:
+        return None
+    calls, tokens = _get_daily_usage("groq")
+    if calls >= GROQ_DAILY_CALL_LIMIT or tokens >= GROQ_DAILY_TOKEN_LIMIT:
+        print(f"ℹ️ عبور از Groq: سقف روزانه داخلی Groq ({calls}/{GROQ_DAILY_CALL_LIMIT} درخواست | {tokens} توکن) پر شده")
         return None
     for key_idx, groq_key in enumerate(GROQ_API_KEYS, start=1):
         groq_client = AsyncOpenAI(api_key=groq_key, base_url="[https://api.groq.com/openai/v1](https://api.groq.com/openai/v1)")
@@ -833,9 +819,11 @@ async def call_groq_provider(prompt: str) -> BatchProcessResult | None:
                     temperature=0.2
                 )
                 content = completion.choices[0].message.content if completion.choices else None
+                used_toks = getattr(completion.usage, "total_tokens", 1400) if getattr(completion, "usage", None) else 1400
+                _record_daily_usage("groq", used_toks)
                 raw_dict = _extract_json_from_llm_content(content)
                 validated = BatchProcessResult.model_validate(raw_dict)
-                print(f"✅ موفقیت با Groq ({model_name})")
+                print(f"✅ موفقیت با Groq ({model_name} | مصرف: {used_toks} توکن)")
                 return validated
             except (ValidationError, json.JSONDecodeError, ValueError):
                 continue
@@ -848,7 +836,14 @@ async def call_groq_provider(prompt: str) -> BatchProcessResult | None:
     return None
 
 async def call_openrouter_provider(prompt: str) -> BatchProcessResult | None:
-    if time.time() < _provider_cooldown_until["openrouter"]:
+    if not OPENROUTER_API_KEYS:
+        return None
+    now = time.time()
+    if now < _provider_cooldown_until["openrouter"]:
+        return None
+    calls, _ = _get_daily_usage("openrouter")
+    if calls >= OPENROUTER_DAILY_CALL_LIMIT:
+        print(f"ℹ️ عبور از OpenRouter: سقف روزانه داخلی ({calls}/{OPENROUTER_DAILY_CALL_LIMIT}) پر شده")
         return None
     for key_idx, or_key in enumerate(OPENROUTER_API_KEYS, start=1):
         or_client = AsyncOpenAI(api_key=or_key, base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)")
@@ -864,6 +859,7 @@ async def call_openrouter_provider(prompt: str) -> BatchProcessResult | None:
                     temperature=0.2
                 )
                 content = completion.choices[0].message.content if completion.choices else None
+                _record_daily_usage("openrouter", 1400)
                 raw_dict = _extract_json_from_llm_content(content)
                 validated = BatchProcessResult.model_validate(raw_dict)
                 print(f"✅ موفقیت با OpenRouter ({model_name})")
@@ -896,7 +892,7 @@ async def ask_ai_json(prompt: str, model_cls, temperature: float = 0.5):
     sys_msg = ("Respond ONLY with valid JSON matching schema:\n" + schema_hint)
 
     async def gemini_fn():
-        if time.time() < _provider_cooldown_until["gemini"]:
+        if not GEMINI_API_KEYS or time.time() < _provider_cooldown_until["gemini"]:
             return None
         for key in GEMINI_API_KEYS:
             client = genai.Client(api_key=key)
@@ -911,13 +907,16 @@ async def ask_ai_json(prompt: str, model_cls, temperature: float = 0.5):
                     continue
                 except Exception as e:
                     if _is_quota_error(e):
-                        _provider_cooldown_until["gemini"] = time.time() + 1800
+                        _provider_cooldown_until["gemini"] = time.time() + GEMINI_COOLDOWN_SECONDS
                         return None
                     break
         return None
 
-    async def openai_compat(name, keys, base_url, models, use_json_mode: bool = True):
-        if time.time() < _provider_cooldown_until[name]:
+    async def openai_compat(name, keys, base_url, models, limit, use_json_mode: bool = True):
+        if not keys or time.time() < _provider_cooldown_until[name]:
+            return None
+        calls, _ = _get_daily_usage(name)
+        if calls >= limit:
             return None
         for key in keys:
             client = AsyncOpenAI(api_key=key, base_url=base_url)
@@ -932,6 +931,7 @@ async def ask_ai_json(prompt: str, model_cls, temperature: float = 0.5):
                         kwargs["response_format"] = {"type": "json_object"}
                     comp = await client.chat.completions.create(**kwargs)
                     content = comp.choices[0].message.content if comp.choices else None
+                    _record_daily_usage(name, 1000)
                     return model_cls.model_validate(_extract_json_from_llm_content(content))
                 except (ValidationError, json.JSONDecodeError, ValueError):
                     continue
@@ -944,8 +944,8 @@ async def ask_ai_json(prompt: str, model_cls, temperature: float = 0.5):
 
     backends = [
         gemini_fn,
-        lambda: openai_compat("groq", GROQ_API_KEYS, "[https://api.groq.com/openai/v1](https://api.groq.com/openai/v1)", GROQ_MODELS, True),
-        lambda: openai_compat("openrouter", OPENROUTER_API_KEYS, "[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)", OPENROUTER_MODELS, False),
+        lambda: openai_compat("groq", GROQ_API_KEYS, "[https://api.groq.com/openai/v1](https://api.groq.com/openai/v1)", GROQ_MODELS, GROQ_DAILY_CALL_LIMIT, True),
+        lambda: openai_compat("openrouter", OPENROUTER_API_KEYS, "[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)", OPENROUTER_MODELS, OPENROUTER_DAILY_CALL_LIMIT, False),
     ]
     start = _extra_ai_rot % 3
     _extra_ai_rot += 1
@@ -955,7 +955,7 @@ async def ask_ai_json(prompt: str, model_cls, temperature: float = 0.5):
             return result
     return None
 
-# ================= ۱۰. پست روزانه قیمت دلار (ساعت ۱۱) =================
+# ================= ۱۰. پست روزانه تقویم و بیتی از سعدی (ساعت ۱۱) =================
 FALLBACK_VERSES = [
     ("بنی‌آدم اعضای یکدیگرند", "که در آفرینش ز یک گوهرند", "گلستان، باب اول، حکایت ۱۰"),
     ("تو کز محنت دیگران بی‌غمی", "نشاید که نامت نهند آدمی", "گلستان، باب اول، حکایت ۱۰"),
@@ -1011,117 +1011,33 @@ async def fetch_saadi_verse(session) -> dict:
     m1, m2, title = random.choice(FALLBACK_VERSES)
     return {"m1": m1, "m2": m2, "title": title, "url": "[https://ganjoor.net/saadi/](https://ganjoor.net/saadi/)"}
 
-def _usd_ok(v) -> bool:
-    return isinstance(v, int) and 20_000 <= v <= 3_000_000
-
-async def _usd_tgju(session):
-    for url in ("[https://call5.tgju.org/ajax.json](https://call5.tgju.org/ajax.json)", "[https://call4.tgju.org/ajax.json](https://call4.tgju.org/ajax.json)"):
-        try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
-                if resp.status != 200:
-                    continue
-                data = await resp.json(content_type=None)
-            raw = data["current"]["price_dollar_rl"]["p"]
-            return int(to_en_digits(raw).replace(",", "")) // 10
-        except Exception:
-            continue
-    return None
-
-async def _usd_tetherland(session):
-    try:
-        async with session.get("[https://api.tetherland.com/currencies](https://api.tetherland.com/currencies)", timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
-            if resp.status != 200:
-                return None
-            data = await resp.json(content_type=None)
-        return int(float(data["data"]["currencies"]["USDT"]["price"]))
-    except Exception:
-        return None
-
-async def _usd_nobitex(session):
-    try:
-        async with session.get("[https://api.nobitex.ir/v3/orderbook/USDTIRT](https://api.nobitex.ir/v3/orderbook/USDTIRT)", timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
-            if resp.status != 200:
-                return None
-            data = await resp.json(content_type=None)
-        last_trade = int(float(data.get("lastTradePrice", 0)))
-        return last_trade // 10 if last_trade > 3_000_000 else last_trade
-    except Exception:
-        return None
-
-async def _usd_wallex(session):
-    try:
-        async with session.get("[https://api.wallex.ir/v1/markets](https://api.wallex.ir/v1/markets)", timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
-            if resp.status != 200:
-                return None
-            data = await resp.json(content_type=None)
-        return int(float(data["result"]["symbols"]["USDTTMN"]["stats"]["lastPrice"]))
-    except Exception:
-        return None
-
-async def get_usd_toman(session):
-    fetchers = [
-        ("tgju.org", _usd_tgju),
-        ("tetherland.com", _usd_tetherland),
-        ("nobitex.ir", _usd_nobitex),
-        ("wallex.ir", _usd_wallex),
-    ]
-    results = await asyncio.gather(*(f(session) for _, f in fetchers), return_exceptions=True)
-    got = [(name, v) for (name, _), v in zip(fetchers, results) if _usd_ok(v)]
-    if not got:
-        return None
-    return int(statistics.median(v for _, v in got)), got
-
-def _fa_money(value: int) -> str:
-    return to_fa_digits(f"{value:,}").replace(",", "٬")
-
-def build_usd_post(value: int, sources: list, verse: dict, dt: datetime, prev_value: int | None = None) -> str:
+def build_daily_calendar_post(verse: dict, dt: datetime) -> str:
     d = format_dates(dt)
     lines = [
-        "💵 <b>قیمت امروز دلار آمریکا</b> | بازار آزاد",
-        f"📅 امروز: <b>{d['weekday']}</b> ({d['weekday_order']}) | {d['jalali']} | {d['gregorian']}",
-        "",
-        f"💰 نرخ هر دلار: <b>{_fa_money(value)} تومان</b>",
-    ]
-    if prev_value and prev_value > 0:
-        diff = value - prev_value
-        if diff > 0:
-            lines.append(f"📈 تغییر نسبت به دیروز: <b>🔺 +{_fa_money(diff)} تومان</b>")
-        elif diff < 0:
-            lines.append(f"📉 تغییر نسبت به دیروز: <b>🔻 -{_fa_money(abs(diff))} تومان</b>")
-        else:
-            lines.append("➖ تغییر نسبت به دیروز: بدون تغییر")
-
-    detail = " ، ".join(f"{html.escape(n)}: {_fa_money(v)}" for n, v in sources)
-    lines += [
-        f"🔎 منابع: {detail}",
+        "🗓 <b>تقویم امروز و کلام سعدی</b>",
+        f"📅 امروز: <b>{d['weekday']}</b> ({d['weekday_order']})",
+        f"☀️ تاریخ شمسی: <b>{d['jalali']}</b>",
+        f"🌍 تاریخ میلادی: <b>{d['gregorian']}</b>",
         "",
         "📜 <b>بیتی از سعدی</b>",
         f"<blockquote>{html.escape(verse['m1'])}\n{html.escape(verse['m2'])}</blockquote>",
         f"✍️ سعدی شیرازی | <a href=\"{html.escape(verse['url'])}\">{html.escape(verse['title'])}</a>",
-        f"\n🏷 #قیمت_دلار #دلار #سعدی{CHANNEL_SIGNATURE}",
+        f"\n🏷 #تقویم_روز #سعدی #شعر_فارسی{CHANNEL_SIGNATURE}",
     ]
     return "\n".join(lines)
 
-async def publish_daily_usd_post_if_due(session):
+async def publish_daily_calendar_post_if_due(session):
     current_tehran = get_current_tehran_time()
     today = current_tehran.strftime("%Y-%m-%d")
-    if not (USD_POST_HOUR <= current_tehran.hour < USD_WINDOW_END_HOUR):
+    if not (CALENDAR_POST_HOUR <= current_tehran.hour < CALENDAR_WINDOW_END_HOUR):
         return
-    if get_metadata("last_usd_post_date") == today:
+    if get_metadata("last_calendar_post_date") == today:
         return
-    got = await get_usd_toman(session)
-    if not got:
-        return
-    value, sources = got
-    prev_raw = get_metadata("last_usd_value", "")
-    prev_value = int(prev_raw) if prev_raw.isdigit() else None
-
     verse = await fetch_saadi_verse(session)
-    text = build_usd_post(value, sources, verse, current_tehran, prev_value=prev_value)
+    text = build_daily_calendar_post(verse, current_tehran)
     markup = InlineKeyboardMarkup([[InlineKeyboardButton("📜 خواندن شعر کامل در گنجور", url=verse["url"])]])
     msg = await send_post(session, text, reply_markup=markup, silent=False)
-    set_metadata("last_usd_post_date", today)
-    set_metadata("last_usd_value", str(value))
+    set_metadata("last_calendar_post_date", today)
     await pin_post(msg.message_id)
 
 # ================= ۱۱. فیلم و موسیقی روزانه (ساعت ۱۲) =================
@@ -1265,7 +1181,7 @@ async def publish_daily_recommendation_if_due(session):
     await pin_post(msg.message_id)
 
 async def run_daily_jobs(session):
-    for job in (unpin_expired_pins, publish_daily_usd_post_if_due, publish_daily_recommendation_if_due):
+    for job in (unpin_expired_pins, publish_daily_calendar_post_if_due, publish_daily_recommendation_if_due):
         try:
             await job(session)
         except Exception as e:
@@ -1358,15 +1274,7 @@ _VER_ICON = {
     "پیش‌بینی تحلیلگران": "📊"
 }
 
-def format_clean_news_post(sel: SelectedNewsItem, orig_item: dict, main_cat_hashtag: str) -> str:
-    """
-    قالب تمیز، کوتاه و بدون شلوغی:
-    - تیتر شفاف
-    - وضعیت اعتبار (بدون اعداد و درصدهای گیج‌کننده)
-    - خلاصه کوتاه ۲ تا ۳ جمله‌ای
-    - حداکثر ۳ نکته کلیدی کوتاه
-    - هشتگ‌های اصلی
-    """
+def format_clean_news_post(sel: SelectedNewsItem, main_cat_hashtag: str) -> str:
     lines = []
     if sel.is_breaking and sel.verification_status == "تأیید رسمی":
         lines.append("🚨 <b>خبر فوری</b>")
@@ -1421,7 +1329,7 @@ async def process_and_publish_batch(
             SELECT id, url, category, source, raw_title, raw_text, image_url, has_video_or_audio, source_count, is_breaking_candidate
             FROM news_items
             WHERE status IN ('pending', 'failed') AND retry_count < 3
-            ORDER BY is_breaking_candidate DESC, source_count DESC, id DESC LIMIT 40
+            ORDER BY is_breaking_candidate DESC, source_count DESC, id DESC LIMIT 36
         """)
 
     rows = c.fetchall()
@@ -1454,7 +1362,6 @@ async def process_and_publish_batch(
         for r in rows
     ]
 
-    # پیش‌فیلتر محلی: فقط برترین کاندیداها به AI فرستاده می‌شوند و بقیه بدون مصرف توکن رد می‌شوند
     all_candidates.sort(key=score_candidate_locally, reverse=True)
     current_batch = all_candidates[:MAX_CANDIDATES_FOR_AI]
     dropped_ids = [item['id'] for item in all_candidates[MAX_CANDIDATES_FOR_AI:]]
@@ -1516,7 +1423,7 @@ RULES:
         polish_selected(sel)
         cat_id = sel.category_id if sel.category_id in CATEGORY_HASHTAGS else orig_item.get('category', 'general_news')
         main_cat_hashtag = CATEGORY_HASHTAGS.get(cat_id, "#اخبار")
-        final_caption = format_clean_news_post(sel, orig_item, main_cat_hashtag)
+        final_caption = format_clean_news_post(sel, main_cat_hashtag)
 
         news_link = orig_item.get('link', STORE_BASE_URL)
         keyboard = [
@@ -1539,8 +1446,6 @@ RULES:
                 ai_payload=sel.model_dump()
             )
             remember_news_message(orig_item['id'], news_msg.message_id)
-            if sel.related_game:
-                record_hype_event(sel.related_game, cat_id, float(sel.hype_score))
 
             if (
                 not silent_mode
@@ -1650,7 +1555,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def background_news_loop(app_bot):
     init_db()
-    print("🚀 Token-Optimized & Clean News Bot is running...")
+    print("🚀 Clean & Token-Optimized News Bot is running...")
 
     await asyncio.sleep(10)
 
