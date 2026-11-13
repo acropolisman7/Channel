@@ -7,7 +7,6 @@ import math
 import html
 import time
 import random
-import statistics
 import aiohttp
 import feedparser
 from collections import Counter
@@ -43,8 +42,6 @@ GROQ_API_KEYS = [k.strip() for k in os.environ.get("GROQ_API_KEYS", "").split(",
 OPENROUTER_API_KEYS = [k.strip() for k in os.environ.get("OPENROUTER_API_KEYS", "").split(",") if k.strip()]
 
 OMDB_API_KEY = os.environ.get("OMDB_API_KEY", "")
-NAVASAN_API_KEY = os.environ.get("NAVASAN_API_KEY", "")
-BRSAPI_KEY = os.environ.get("BRSAPI_KEY", "")
 
 TARGET_CHANNEL = '@jazebestore'
 CHANNEL_USERNAME_CLEAN = TARGET_CHANNEL.lstrip('@')
@@ -56,17 +53,17 @@ DB_PATH = 'rss_news_history.db'
 BREAKING_CHECK_INTERVAL_SECONDS = 180
 REGULAR_CYCLE_SECONDS = 1800
 MAX_NEWS_PER_CYCLE = 12
-MAX_STANDALONE_POSTS_PER_CYCLE = 3    # فقط ۳ خبر برتر به صورت پست مستقل منتشر می‌شوند و مابقی در بسته مرور سریع تجمیع می‌شوند
+MAX_STANDALONE_POSTS_PER_CYCLE = 3
 MAX_BREAKING_PER_CYCLE = 2
-MAX_CANDIDATES_FOR_AI = 24            # کاهش هوشمند کاندیداها پس از پیش‌فیلتر محلی برای جلوگیری از خطای 413 در Groq
+MAX_CANDIDATES_FOR_AI = 24
 SEMANTIC_SIMILARITY_THRESHOLD = 0.78
 CLUSTER_SIMILARITY_THRESHOLD = 0.72
 HYPE_HALF_LIFE_HOURS = 18.0
 
-# تنظیمات افزونه‌های روزانه و تعاملی
+# تنظیمات زمان‌بندی پست‌های روزانه پین‌شده (تقویم و شعر سعدی + فیلم و موسیقی)
 TEHRAN = ZoneInfo("Asia/Tehran")
-USD_POST_HOUR = 11
-USD_WINDOW_END_HOUR = 24
+DAILY_POEM_POST_HOUR = 11
+DAILY_POEM_WINDOW_END_HOUR = 24
 DAILY_REC_HOUR = 12
 DAILY_REC_WINDOW_END_HOUR = 24
 POLL_MIN_HYPE = 8
@@ -294,7 +291,6 @@ def init_db():
                     discovered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     published_at TIMESTAMP
                 )''')
-    # افزودن ستون‌های جدید در صورت وجود دیتابیس قدیمی
     for col_def in ("telegram_message_id INTEGER", "likes_count INTEGER DEFAULT 0"):
         try:
             c.execute(f"ALTER TABLE news_items ADD COLUMN {col_def}")
@@ -393,7 +389,6 @@ def save_published_news_details(
     conn.close()
 
 def record_category_like(item_id: int):
-    """ثبت کلیک لایک در دیتابیس برای سنجش نرخ تعامل واقعی هر دسته‌بندی"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("UPDATE news_items SET likes_count = COALESCE(likes_count, 0) + 1 WHERE id = ?", (item_id,))
@@ -409,7 +404,6 @@ def record_category_like(item_id: int):
     conn.close()
 
 def get_category_engagement_weights() -> dict[str, float]:
-    """محاسبه ضریب جذابیت هر دسته‌بندی بر اساس نسبت لایک به پست‌های منتشرشده"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT category, published_posts, total_likes FROM category_engagement")
@@ -423,7 +417,6 @@ def get_category_engagement_weights() -> dict[str, float]:
     return weights
 
 def get_related_channel_archive_links(related_entity: str, exclude_item_id: int, limit: int = 2) -> list[tuple[str, str]]:
-    """پیدا کردن پست‌های قبلی منتشرشده در کانال درباره همین موضوع برای اتصال آرشیو موضوعی (Topic Hub)"""
     if not related_entity or len(related_entity.strip()) < 3:
         return []
     clean_ent = related_entity.strip().lower()
@@ -556,10 +549,6 @@ def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 def score_candidate_locally(item: dict, cat_weights: dict[str, float]) -> float:
-    """
-    پیش‌فیلتر هوشمند محلی قبل از ارسال به AI:
-    امتیازدهی بر اساس تعدد منابع، اخبار فوری، رسانه، کلمات کلیدی داغ و نرخ تعامل واقعی دسته‌بندی.
-    """
     score = 1.0
     if item.get('is_breaking_candidate'):
         score += 5.0
@@ -573,7 +562,6 @@ def score_candidate_locally(item: dict, cat_weights: dict[str, float]) -> float:
     kw_hits = sum(1 for kw in HIGH_VALUE_KEYWORDS if kw in low_text)
     score += min(4.0, kw_hits * 0.8)
 
-    # اعمال ضریب تعامل واقعی مخاطبان در هر دسته‌بندی
     cat = item.get('category', 'general_news')
     score += cat_weights.get(cat, 0.5)
     return round(score, 2)
@@ -878,7 +866,6 @@ async def send_post(session, text, image_url=None, reply_markup=None, silent=Fal
         return await send_text_single(text, "HTML", reply_markup, reply_to, media_url=None)
 
 async def send_interactive_poll_reply(sel, reply_to_msg_id: int, silent: bool = False):
-    """ارسال نظرسنجی تعاملی تلگرام (send_poll) زیر اخبار داغ با هایپ بالا"""
     if not sel.poll_question or not sel.poll_options or len(sel.poll_options) < 2:
         return
     clean_q = _strip_tags(sel.poll_question)[:280]
@@ -1174,7 +1161,7 @@ async def ask_ai_json(prompt: str, model_cls, temperature: float = 0.5):
             return result
     return None
 
-# ================= ۱۰. پست روزانه قیمت دلار + مقایسه با روز قبل + بیتی از سعدی =================
+# ================= ۱۰. پست روزانه تقویم (تاریخ روز و چندشنبه) + یک بیت شعر از سعدی (ساعت ۱۱) =================
 FALLBACK_VERSES = [
     ("بنی‌آدم اعضای یکدیگرند", "که در آفرینش ز یک گوهرند", "گلستان، باب اول، حکایت ۱۰"),
     ("چو عضوی به درد آورد روزگار", "دگر عضوها را نماند قرار", "گلستان، باب اول، حکایت ۱۰"),
@@ -1231,170 +1218,37 @@ async def fetch_saadi_verse(session) -> dict:
     m1, m2, title = random.choice(FALLBACK_VERSES)
     return {"m1": m1, "m2": m2, "title": title, "url": "[https://ganjoor.net/saadi/](https://ganjoor.net/saadi/)"}
 
-def _usd_ok(v) -> bool:
-    return isinstance(v, int) and 20_000 <= v <= 3_000_000
-
-async def _usd_tgju(session):
-    for url in ("[https://call5.tgju.org/ajax.json](https://call5.tgju.org/ajax.json)", "[https://call4.tgju.org/ajax.json](https://call4.tgju.org/ajax.json)", "[https://call3.tgju.org/ajax.json](https://call3.tgju.org/ajax.json)"):
-        try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
-                if resp.status != 200:
-                    continue
-                data = await resp.json(content_type=None)
-            raw = data["current"]["price_dollar_rl"]["p"]
-            return int(to_en_digits(raw).replace(",", "")) // 10
-        except Exception:
-            continue
-    return None
-
-async def _usd_alanchand(session):
-    try:
-        async with session.get("[https://alanchand.com/currencies-price/usd](https://alanchand.com/currencies-price/usd)", timeout=aiohttp.ClientTimeout(total=15), headers=UA) as resp:
-            if resp.status != 200:
-                return None
-            page = await resp.text()
-        text = to_en_digits(BeautifulSoup(page, "html.parser").get_text(" ", strip=True))
-        m = re.search(r"دلار[^\d]{0,120}?(\d{2,3},\d{3})", text)
-        return int(m.group(1).replace(",", "")) if m else None
-    except Exception:
-        return None
-
-async def _usd_tetherland(session):
-    try:
-        async with session.get("[https://api.tetherland.com/currencies](https://api.tetherland.com/currencies)", timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
-            if resp.status != 200:
-                return None
-            data = await resp.json(content_type=None)
-        price = data["data"]["currencies"]["USDT"]["price"]
-        return int(float(price))
-    except Exception:
-        return None
-
-async def _usd_nobitex(session):
-    try:
-        async with session.get("[https://api.nobitex.ir/v3/orderbook/USDTIRT](https://api.nobitex.ir/v3/orderbook/USDTIRT)", timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
-            if resp.status != 200:
-                return None
-            data = await resp.json(content_type=None)
-        last_trade = int(float(data.get("lastTradePrice", 0)))
-        return last_trade // 10 if last_trade > 3_000_000 else last_trade
-    except Exception:
-        return None
-
-async def _usd_wallex(session):
-    try:
-        async with session.get("[https://api.wallex.ir/v1/markets](https://api.wallex.ir/v1/markets)", timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
-            if resp.status != 200:
-                return None
-            data = await resp.json(content_type=None)
-        stats = data["result"]["symbols"]["USDTTMN"]["stats"]
-        return int(float(stats["lastPrice"]))
-    except Exception:
-        return None
-
-async def _usd_navasan(session):
-    if not NAVASAN_API_KEY:
-        return None
-    try:
-        url = f"[http://api.navasan.tech/latest/?api_key=](http://api.navasan.tech/latest/?api_key=){NAVASAN_API_KEY}&item=usd_sell"
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
-            data = await resp.json(content_type=None)
-        return int(float(to_en_digits(data["usd_sell"]["value"]).replace(",", "")))
-    except Exception:
-        return None
-
-async def _usd_brsapi(session):
-    if not BRSAPI_KEY:
-        return None
-    try:
-        url = f"[https://brsapi.ir/Api/Market/Gold_Currency.php?key=](https://brsapi.ir/Api/Market/Gold_Currency.php?key=){BRSAPI_KEY}"
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
-            data = await resp.json(content_type=None)
-        for item in data.get("currency", []):
-            if str(item.get("symbol", "")).upper() == "USD":
-                v = int(float(to_en_digits(item.get("price", 0)).replace(",", "")))
-                return v // 10 if v > 3_000_000 else v
-    except Exception:
-        return None
-    return None
-
-async def get_usd_toman(session):
-    fetchers = [
-        ("tgju.org", _usd_tgju),
-        ("alanchand.com", _usd_alanchand),
-        ("tetherland.com", _usd_tetherland),
-        ("nobitex.ir", _usd_nobitex),
-        ("wallex.ir", _usd_wallex),
-        ("navasan.tech", _usd_navasan),
-        ("brsapi.ir", _usd_brsapi),
-    ]
-    results = await asyncio.gather(*(f(session) for _, f in fetchers), return_exceptions=True)
-    got = [(name, v) for (name, _), v in zip(fetchers, results) if _usd_ok(v)]
-    if not got:
-        return None
-    return int(statistics.median(v for _, v in got)), got
-
-def _fa_money(value: int) -> str:
-    return to_fa_digits(f"{value:,}").replace(",", "٬")
-
-def build_usd_post(value: int, sources: list, verse: dict, dt: datetime, prev_value: int = 0) -> str:
+def build_daily_poem_post(verse: dict, dt: datetime) -> str:
     d = format_dates(dt)
     lines = [
-        "💵 <b>قیمت امروز دلار آمریکا</b> | بازار آزاد",
-        f"📅 امروز: <b>{d['weekday']}</b> ({d['weekday_order']}) | {d['jalali']} | {d['gregorian']}",
-        "",
-        f"💰 نرخ هر دلار آمریکا: <b>{_fa_money(value)} تومان</b>",
-    ]
-    # پایش تغییرات قیمت دلار نسبت به روز قبل
-    if prev_value > 0:
-        diff = value - prev_value
-        if diff > 0:
-            lines.append(f"📈 تغییر نسبت به روز قبل: <b>🔺 +{_fa_money(diff)} تومان</b> (نرخ قبلی: {_fa_money(prev_value)} تومان)")
-        elif diff < 0:
-            lines.append(f"📉 تغییر نسبت به روز قبل: <b>🔻 -{_fa_money(abs(diff))} تومان</b> (نرخ قبلی: {_fa_money(prev_value)} تومان)")
-        else:
-            lines.append(f"➖ تغییر نسبت به روز قبل: <b>بدون تغییر</b> ({_fa_money(prev_value)} تومان)")
-
-    if len(sources) >= 2:
-        detail = " ، ".join(f"{html.escape(n)}: {_fa_money(v)}" for n, v in sources)
-        lines.append(f"🔎 نرخ گزارش‌شده در منابع: {detail}")
-        lines.append("ℹ️ عدد اعلام‌شده، میانه‌ی نرخ منابع معتبر بالاست.")
-    else:
-        lines.append(f"🔎 منبع: {html.escape(sources[0][0])}")
-    lines.append("ℹ️ نرخ‌ها لحظه‌ای‌اند و ممکن است میان صرافی‌ها اندکی تفاوت داشته باشند.")
-    lines += [
+        "🗓 <b>تقویم امروز و بیتی از سعدی</b>",
+        f"📅 امروز: <b>{d['weekday']}</b> ({d['weekday_order']})",
+        f"☀️ تاریخ شمسی: <b>{d['jalali']}</b>",
+        f"🌍 تاریخ میلادی: <b>{d['gregorian']}</b>",
         "",
         "📜 <b>بیتی از سعدی</b>",
         f"<blockquote>{html.escape(verse['m1'])}\n{html.escape(verse['m2'])}</blockquote>",
         f"✍️ سعدی شیرازی | <a href=\"{html.escape(verse['url'])}\">{html.escape(verse['title'])}</a> (گنجور)",
-        f"\n🏷 #قیمت_دلار #دلار #سعدی #شعر_فارسی{CHANNEL_SIGNATURE}",
+        f"\n🏷 #تقویم_روز #سعدی #شعر_فارسی #ادبیات{CHANNEL_SIGNATURE}",
     ]
     return "\n".join(lines)
 
-async def publish_daily_usd_post_if_due(session):
+async def publish_daily_poem_post_if_due(session):
     current_tehran = get_current_tehran_time()
     today = current_tehran.strftime("%Y-%m-%d")
-    if not (USD_POST_HOUR <= current_tehran.hour < USD_WINDOW_END_HOUR):
+    if not (DAILY_POEM_POST_HOUR <= current_tehran.hour < DAILY_POEM_WINDOW_END_HOUR):
         return
-    if get_metadata("last_usd_post_date") == today:
+    if get_metadata("last_daily_poem_date") == today:
         return
-    got = await get_usd_toman(session)
-    if not got:
-        print("⚠️ قیمت دلار از هیچ منبعی دریافت نشد؛ در چرخه‌ی بعد دوباره تلاش می‌شود.")
-        return
-    value, sources = got
-    prev_raw = get_metadata("last_usd_rate", "0")
-    prev_value = int(prev_raw) if prev_raw.isdigit() else 0
 
     verse = await fetch_saadi_verse(session)
-    text = build_usd_post(value, sources, verse, current_tehran, prev_value=prev_value)
+    text = build_daily_poem_post(verse, current_tehran)
     markup = InlineKeyboardMarkup([[InlineKeyboardButton("📜 خواندن شعر کامل در گنجور", url=verse["url"])]])
     msg = await send_post(session, text, reply_markup=markup, silent=False)
 
-    set_metadata("last_usd_post_date", today)
-    set_metadata("last_usd_rate", str(value))
+    set_metadata("last_daily_poem_date", today)
     await pin_post(msg.message_id)
-    print(f"✅ پست دلار منتشر شد: {value:,} تومان")
+    print(f"✅ پست تقویم امروز و شعر سعدی منتشر و پین شد ({today}).")
 
 # ================= ۱۱. فیلم و موسیقی روزانه (ساعت ۱۲) بر اساس روز جهانی =================
 INTERNATIONAL_DAYS = {
@@ -1610,7 +1464,7 @@ async def publish_daily_recommendation_if_due(session):
     print(f"✅ پیشنهاد روزانه منتشر شد: {m.title_en} | {mu.artist} - {mu.track}")
 
 async def run_daily_jobs(session):
-    for job in (unpin_expired_pins, publish_daily_usd_post_if_due, publish_daily_recommendation_if_due):
+    for job in (unpin_expired_pins, publish_daily_poem_post_if_due, publish_daily_recommendation_if_due):
         try:
             await job(session)
         except Exception as e:
@@ -1954,7 +1808,6 @@ def format_rich_news_post(sel: SelectedNewsItem, orig_item: dict, main_cat_hasht
     summary = re.sub(r"\s*\n\s*", " ", sel.summary_persian or "")
     lines.append(f"<blockquote>{sanitize_telegram_html(summary)}</blockquote>")
 
-    # بخش مقایسه قبل و بعد (Before vs After) در صورت وجود تغییر مهم
     before_after = getattr(sel, "before_after_persian", "") or ""
     if before_after.strip():
         lines.append("")
@@ -1966,7 +1819,6 @@ def format_rich_news_post(sel: SelectedNewsItem, orig_item: dict, main_cat_hasht
         background = re.sub(r"\s*\n\s*", " ", background)
         lines.append(f"📌 <b>پیش‌زمینه:</b> {sanitize_telegram_html(background)}")
 
-    # اتصال هوشمند به آرشیو موضوعی کانال (Topic Hub) برای پست‌های قبلی همین بازی/موضوع
     if sel.related_game:
         archive_links = get_related_channel_archive_links(sel.related_game, orig_item['id'], limit=2)
         if archive_links:
@@ -2009,10 +1861,6 @@ async def publish_roundup_digest_post(
     roundup_items: list[tuple[SelectedNewsItem, dict]],
     silent_mode: bool
 ):
-    """
-    تجمیع‌گر هوشمند (Smart Digest Batching):
-    انتشار اخبار رده دوم در قالب یک پست یکپارچه «مرور سریع ۳۰ دقیقه اخیر» برای جلوگیری از خستگی اعلان.
-    """
     if not roundup_items:
         return
     current_tehran = get_current_tehran_time()
@@ -2113,7 +1961,6 @@ async def process_and_publish_batch(
         for r in rows
     ]
 
-    # پیش‌فیلتر محلی هوشمند برای کاهش مصرف توکن و انتخاب ۲۴ کاندیدای برتر قبل از فراخوانی AI
     cat_weights = get_category_engagement_weights()
     for item in all_fetched:
         item['_local_score'] = score_candidate_locally(item, cat_weights)
@@ -2176,12 +2023,10 @@ async def process_and_publish_batch(
     if not breaking_only and non_selected_ids:
         update_news_status(non_selected_ids, 'rejected')
 
-    # تفکیک خبرهای مستقل (حداکثر ۳ خبر برتر) از خبرهای بسته مرور سریع (Smart Digest Batching)
     standalone_limit = max_items if breaking_only else MAX_STANDALONE_POSTS_PER_CYCLE
     standalone_selections = selected_items[:standalone_limit]
     roundup_selections = [] if breaking_only else selected_items[standalone_limit:]
 
-    # تکمیل متن کامل مقاله فقط برای خبرهای مستقل (صرفه‌جویی چشمگیر در مصرف API)
     standalone_selections = await enrich_selected_items(session, standalone_selections, batch_map)
 
     tehran_hour = get_current_tehran_time().hour
@@ -2230,7 +2075,6 @@ async def process_and_publish_batch(
             if video_url:
                 await send_video_reply(video_url, news_msg.message_id, silent_mode)
 
-            # ارسال خودکار نظرسنجی تعاملی تلگرام زیر اخبار داغ (hype_score >= 8)
             if not silent_mode and sel.hype_score >= POLL_MIN_HYPE and sel.poll_question:
                 await send_interactive_poll_reply(sel, news_msg.message_id, silent_mode)
 
@@ -2245,7 +2089,6 @@ async def process_and_publish_batch(
             print(f"⚠️ خطا در ارسال خبر #{orig_item['id']} به تلگرام: {send_err}")
             update_news_status([orig_item['id']], 'failed', increment_retry=True)
 
-    # انتشار باقی اخبار برگزیده در یک پست یکپارچه «مرور سریع»
     if roundup_selections:
         roundup_pairs = [(s, batch_map[s.selected_id]) for s in roundup_selections if s.selected_id in batch_map]
         await publish_roundup_digest_post(session, roundup_pairs, silent_mode)
@@ -2337,7 +2180,6 @@ async def publish_daily_digest_if_due():
 
 # ================= ۱۶. داشبورد سلامت ربات برای ادمین (/status) و مدیریت لایک =================
 async def admin_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """داشبورد خصوصی وضعیت سلامت ربات، سهمیه APIها و آمار تعامل دسته‌بندی‌ها (/status)"""
     if not update.effective_user or not update.message:
         return
     user_id = update.effective_user.id
@@ -2356,9 +2198,7 @@ async def admin_status_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
     trends = detect_24h_trends(top_n=4)
     trend_str = " | ".join(f"{t['entity']} ({t['mentions']})" for t in trends) if trends else "هنوز ثبت نشده"
-    usd_rate = get_metadata("last_usd_rate", "ثبت نشده")
-    if usd_rate.isdigit():
-        usd_rate = f"{_fa_money(int(usd_rate))} تومان"
+    poem_date = get_metadata("last_daily_poem_date", "منتشر نشده")
 
     g_health = get_metadata("api_health_gemini", "در انتظار اولین اجرا")
     q_health = get_metadata("api_health_groq", "در انتظار اولین اجرا")
@@ -2370,7 +2210,7 @@ async def admin_status_command(update: Update, context: ContextTypes.DEFAULT_TYP
         "",
         f"📰 اخبار منتشرشده ۲۴ ساعت اخیر: <b>{to_fa_digits(pub_24h)} خبر</b>",
         f"⏳ خبرهای در صف پردازش: <b>{to_fa_digits(pending_cnt)} خبر</b>",
-        f"💵 آخرین نرخ دلار ثبت‌شده: <b>{usd_rate}</b>",
+        f"📜 آخرین انتشار تقویم و شعر سعدی: <b>{poem_date}</b>",
         f"🔥 ترندهای ۲۴ ساعته: <b>{html.escape(trend_str)}</b>",
         "",
         "<b>وضعیت سرویس‌های هوش مصنوعی:</b>",
@@ -2430,7 +2270,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def background_news_loop(app_bot):
     init_db()
-    print("🚀 24/7 Smart Digest, Interactive Polls, Topic Hub & Trend Bot is running...")
+    print("🚀 24/7 Smart Digest, Daily Calendar/Saadi Poem, Interactive Polls & Trend Bot is running...")
 
     await asyncio.sleep(10)
 
