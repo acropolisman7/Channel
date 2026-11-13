@@ -264,6 +264,16 @@ os.makedirs('temp_media', exist_ok=True)
 provider_rotation_index = 0
 _extra_ai_rot = 0
 
+def sanitize_plain_url(url: str) -> str:
+    """پاک‌سازی خودکار آدرس از هرگونه براکت یا فرمت Markdown احتمالی"""
+    if not url:
+        return ""
+    u = url.strip()
+    md_match = re.match(r'^\[[^\]]*\]\((https?://[^)]+)\)', u)
+    if md_match:
+        u = md_match.group(1)
+    return u.strip("[]()<> ")
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -763,20 +773,21 @@ def extract_rss_media_info(entry) -> tuple[str | None, bool]:
         if img_tag and img_tag.get('src'):
             img_url = img_tag['src']
 
-    return img_url, has_av
+    return sanitize_plain_url(img_url) if img_url else None, has_av
 
 async def download_image_from_url(session: aiohttp.ClientSession, url: str, filename: str) -> str | None:
-    if not url:
+    clean_url = sanitize_plain_url(url)
+    if not clean_url:
         return None
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15), headers=UA) as resp:
+        async with session.get(clean_url, timeout=aiohttp.ClientTimeout(total=15), headers=UA) as resp:
             if resp.status == 200:
                 filepath = os.path.join('temp_media', filename)
                 with open(filepath, 'wb') as f:
                     f.write(await resp.read())
                 return filepath
     except Exception as e:
-        print(f"Error downloading image {url}: {e}")
+        print(f"Error downloading image {clean_url}: {e}")
     return None
 
 def _visible_len(text: str) -> int:
@@ -807,6 +818,7 @@ def _reply_kwargs(message_id):
 async def send_post(session, text, image_url=None, reply_markup=None, silent=False,
                     reply_to=None, filename="post.jpg", link_preview=False):
     text = _fit_lines(text, 4000)
+    clean_img_url = sanitize_plain_url(image_url) if image_url else None
 
     async def send_text_single(body, parse_mode, markup, reply_id, media_url=None):
         preview_opts = None
@@ -840,8 +852,8 @@ async def send_post(session, text, image_url=None, reply_markup=None, silent=Fal
                 **_reply_kwargs(reply_id)
             )
 
-    if image_url and _visible_len(text) <= 1000:
-        img_path = await download_image_from_url(session, image_url, filename)
+    if clean_img_url and _visible_len(text) <= 1000:
+        img_path = await download_image_from_url(session, clean_img_url, filename)
         try:
             if img_path and os.path.exists(img_path):
                 try:
@@ -858,11 +870,11 @@ async def send_post(session, text, image_url=None, reply_markup=None, silent=Fal
                     pass
 
     try:
-        return await send_text_single(text, "HTML", reply_markup, reply_to, media_url=image_url)
+        return await send_text_single(text, "HTML", reply_markup, reply_to, media_url=clean_img_url)
     except Exception as err:
         err_low = str(err).lower()
         if "entities" in err_low or "parse" in err_low:
-            return await send_text_single(_strip_tags(text), None, reply_markup, reply_to, media_url=image_url)
+            return await send_text_single(_strip_tags(text), None, reply_markup, reply_to, media_url=clean_img_url)
         return await send_text_single(text, "HTML", reply_markup, reply_to, media_url=None)
 
 async def send_interactive_poll_reply(sel, reply_to_msg_id: int, silent: bool = False):
@@ -1184,9 +1196,12 @@ def _extract_beit(poem: dict):
     if not pairs:
         return None
     m1, m2 = random.choice(pairs)
-    return {"m1": persian_polish(m1), "m2": persian_polish(m2),
-            "title": poem.get("fullTitle") or "دیوان سعدی",
-            "url": "[https://ganjoor.net](https://ganjoor.net)" + full_url}
+    return {
+        "m1": persian_polish(m1),
+        "m2": persian_polish(m2),
+        "title": poem.get("fullTitle") or "دیوان سعدی",
+        "url": sanitize_plain_url("[https://ganjoor.net](https://ganjoor.net)" + full_url)
+    }
 
 async def fetch_saadi_verse(session) -> dict:
     base = "[https://api.ganjoor.net/api/ganjoor](https://api.ganjoor.net/api/ganjoor)"
@@ -1216,10 +1231,16 @@ async def fetch_saadi_verse(session) -> dict:
     except Exception as e:
         print(f"⚠️ دریافت شعر از گنجور ناموفق: {e}")
     m1, m2, title = random.choice(FALLBACK_VERSES)
-    return {"m1": m1, "m2": m2, "title": title, "url": "[https://ganjoor.net/saadi/](https://ganjoor.net/saadi/)"}
+    return {
+        "m1": m1,
+        "m2": m2,
+        "title": title,
+        "url": "[https://ganjoor.net/saadi/](https://ganjoor.net/saadi/)"
+    }
 
 def build_daily_poem_post(verse: dict, dt: datetime) -> str:
     d = format_dates(dt)
+    poem_url = sanitize_plain_url(verse["url"])
     lines = [
         "🗓 <b>تقویم امروز و بیتی از سعدی</b>",
         f"📅 امروز: <b>{d['weekday']}</b> ({d['weekday_order']})",
@@ -1228,7 +1249,7 @@ def build_daily_poem_post(verse: dict, dt: datetime) -> str:
         "",
         "📜 <b>بیتی از سعدی</b>",
         f"<blockquote>{html.escape(verse['m1'])}\n{html.escape(verse['m2'])}</blockquote>",
-        f"✍️ سعدی شیرازی | <a href=\"{html.escape(verse['url'])}\">{html.escape(verse['title'])}</a> (گنجور)",
+        f"✍️ سعدی شیرازی | <a href=\"{html.escape(poem_url)}\">{html.escape(verse['title'])}</a> (گنجور)",
         f"\n🏷 #تقویم_روز #سعدی #شعر_فارسی #ادبیات{CHANNEL_SIGNATURE}",
     ]
     return "\n".join(lines)
@@ -1242,8 +1263,9 @@ async def publish_daily_poem_post_if_due(session):
         return
 
     verse = await fetch_saadi_verse(session)
+    poem_url = sanitize_plain_url(verse["url"])
     text = build_daily_poem_post(verse, current_tehran)
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton("📜 خواندن شعر کامل در گنجور", url=verse["url"])]])
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("📜 خواندن شعر کامل در گنجور", url=poem_url)]])
     msg = await send_post(session, text, reply_markup=markup, silent=False)
 
     set_metadata("last_daily_poem_date", today)
@@ -1351,7 +1373,8 @@ async def omdb_lookup(session, title: str, year: int):
             return None
         rating = float(data.get("imdbRating", "0"))
         votes = int(to_en_digits(data.get("imdbVotes", "0")).replace(",", "") or 0)
-        poster = data.get("Poster") if str(data.get("Poster", "")).startswith("http") else None
+        raw_poster = str(data.get("Poster", ""))
+        poster = sanitize_plain_url(raw_poster) if raw_poster.startswith("http") else None
         return {"rating": rating, "votes": votes, "id": data.get("imdbID"), "poster": poster}
     except Exception:
         return None
@@ -1445,13 +1468,18 @@ async def publish_daily_recommendation_if_due(session):
     rec, info, genre_key, genre_fa, occasion = result
     text = build_daily_rec_post(rec, info, genre_fa, occasion, current_tehran)
     m, mu = rec.movie, rec.music
-    imdb_url = f"[https://www.imdb.com/title/](https://www.imdb.com/title/){info['id']}/" if info and info.get("id") else \
-        f"[https://www.imdb.com/find/?q=](https://www.imdb.com/find/?q=){quote_plus(m.title_en + ' ' + str(m.year))}"
+    imdb_url = sanitize_plain_url(
+        f"[https://www.imdb.com/title/](https://www.imdb.com/title/){info['id']}/" if info and info.get("id")
+        else f"[https://www.imdb.com/find/?q=](https://www.imdb.com/find/?q=){quote_plus(m.title_en + ' ' + str(m.year))}"
+    )
     music_q = quote_plus(f"{mu.artist} {mu.track}")
+    yt_url = sanitize_plain_url(f"[https://www.youtube.com/results?search_query=](https://www.youtube.com/results?search_query=){music_q}")
+    sp_url = sanitize_plain_url(f"[https://open.spotify.com/search/](https://open.spotify.com/search/){music_q}")
+
     markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("🎬 صفحه‌ی فیلم در IMDb", url=imdb_url)],
-        [InlineKeyboardButton("▶️ شنیدن موسیقی در YouTube", url=f"[https://www.youtube.com/results?search_query=](https://www.youtube.com/results?search_query=){music_q}")],
-        [InlineKeyboardButton("🎧 جستجو در Spotify", url=f"[https://open.spotify.com/search/](https://open.spotify.com/search/){music_q}")],
+        [InlineKeyboardButton("▶️ شنیدن موسیقی در YouTube", url=yt_url)],
+        [InlineKeyboardButton("🎧 جستجو در Spotify", url=sp_url)],
     ])
     msg = await send_post(session, text, image_url=(info or {}).get("poster"), reply_markup=markup,
                           filename="daily_rec.jpg")
@@ -1478,8 +1506,9 @@ def _youtube_watch_url(url: str) -> str:
     return f"[https://www.youtube.com/watch?v=](https://www.youtube.com/watch?v=){m.group(1)}" if m else url
 
 async def fetch_article_details(session, url: str):
+    clean_u = sanitize_plain_url(url)
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
+        async with session.get(clean_u, timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
             if resp.status != 200 or "html" not in resp.headers.get("Content-Type", "").lower():
                 return "", ""
             page = await resp.text(errors="ignore")
@@ -1502,14 +1531,14 @@ async def fetch_article_details(session, url: str):
         paras = [p.get_text(" ", strip=True) for p in container.find_all("p")]
         paras = [p for p in paras if len(p) > 50 and not _NOISE.search(p)]
         body = " ".join(paras)[:ARTICLE_MAX_CHARS * 2]
-        return body, _youtube_watch_url(video) if video else ""
+        return body, sanitize_plain_url(_youtube_watch_url(video)) if video else ""
     except Exception:
         return "", ""
 
 def pick_video_url(orig_item: dict) -> str:
     if orig_item.get("video_url"):
-        return orig_item["video_url"]
-    link = orig_item.get("link", "") or ""
+        return sanitize_plain_url(orig_item["video_url"])
+    link = sanitize_plain_url(orig_item.get("link", "") or "")
     if re.search(r"youtube\.com/watch|youtu\.be/|twitch\.tv|vimeo\.com", link):
         return link
     return ""
@@ -1579,10 +1608,13 @@ Items:
     return selected_items
 
 async def send_video_reply(video_url: str, reply_to: int, silent: bool = False):
+    clean_v = sanitize_plain_url(video_url)
+    if not clean_v:
+        return
     try:
         await bot.send_message(
             chat_id=TARGET_CHANNEL, parse_mode="HTML", disable_notification=silent,
-            text=f"🎬 <b>ویدیوی مرتبط با این خبر</b>\n{html.escape(video_url)}",
+            text=f"🎬 <b>ویدیوی مرتبط با این خبر</b>\n{html.escape(clean_v)}",
             disable_web_page_preview=False, **_reply_kwargs(reply_to))
     except Exception as e:
         print(f"⚠️ ارسال ویدیو ناموفق: {e}")
@@ -1618,14 +1650,14 @@ async def _reddit_candidates(session, query: str) -> list:
         for e in feed.entries:
             tags = getattr(e, "tags", []) or []
             sub = str(tags[0].get("term", "")).lower() if tags else ""
-            link = getattr(e, "link", "")
+            link = sanitize_plain_url(getattr(e, "link", ""))
             if sub not in MEME_SUBREDDITS or not link or link in seen:
                 continue
             body = e.content[0].value if getattr(e, "content", None) else ""
             m = re.search(r'https://(?:i|preview)\.redd\.it/[^"\']+?\.(?:jpe?g|png|webp)[^"\']*', body)
-            img = html.unescape(m.group(0)) if m else None
+            img = sanitize_plain_url(html.unescape(m.group(0))) if m else None
             if not img and getattr(e, "media_thumbnail", None):
-                img = e.media_thumbnail[0].get("url")
+                img = sanitize_plain_url(e.media_thumbnail[0].get("url"))
             out.append({"index": len(out), "subreddit": sub, "title": (e.title or "")[:200], "link": link, "image": img})
             if len(out) >= 5:
                 return out
@@ -1652,16 +1684,17 @@ are not in the title. Reject anything insulting, sexual, hateful, religious or p
             return False
         c = cands[pick.chosen_index]
         e = html.escape
+        meme_link = sanitize_plain_url(c["link"])
         lines = ["😄 <b>شوخی کاربران فضای مجازی</b>",
                  f"<blockquote>{e(persian_polish(pick.joke_persian))}</blockquote>"]
         if pick.context_persian.strip():
             lines.append(f"💬 {e(persian_polish(pick.context_persian))}")
         lines.append(f"📎 برگرفته از پست کاربران Reddit (r/{e(c['subreddit'])}): «{e(c['title'][:120])}»")
         lines.append(f"\n🏷 #شوخی_کاربران #میم #فان{CHANNEL_SIGNATURE}")
-        markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 دیدن پست اصلی در Reddit", url=c["link"])]])
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 دیدن پست اصلی در Reddit", url=meme_link)]])
         await send_post(session, "\n".join(lines), image_url=c["image"], reply_markup=markup,
                         reply_to=reply_to, filename=f"meme_{c['index']}.jpg")
-        seen = (_meme_seen() + [c["link"]])[-300:]
+        seen = (_meme_seen() + [meme_link])[-300:]
         set_metadata("meme_seen", json.dumps(seen))
         set_metadata("last_meme_ts", str(get_current_tehran_time().timestamp()))
         return True
@@ -1708,9 +1741,10 @@ async def publish_trending_meme(session):
 
 # ================= ۱۳. جمع‌آوری هم‌زمان فیدهای RSS =================
 async def fetch_single_feed(session: aiohttp.ClientSession, sem: asyncio.Semaphore, category: str, url: str) -> list[dict]:
+    clean_feed_url = sanitize_plain_url(url)
     async with sem:
         try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=12), headers={'User-Agent': 'Mozilla/5.0'}) as resp:
+            async with session.get(clean_feed_url, timeout=aiohttp.ClientTimeout(total=12), headers={'User-Agent': 'Mozilla/5.0'}) as resp:
                 if resp.status != 200:
                     return []
                 xml_data = await resp.text()
@@ -1718,7 +1752,7 @@ async def fetch_single_feed(session: aiohttp.ClientSession, sem: asyncio.Semapho
             feed = await asyncio.to_thread(feedparser.parse, xml_data)
             extracted = []
             for entry in feed.entries[:2]:
-                link = getattr(entry, 'link', None)
+                link = sanitize_plain_url(getattr(entry, 'link', None))
                 if not link:
                     continue
 
@@ -1735,7 +1769,7 @@ async def fetch_single_feed(session: aiohttp.ClientSession, sem: asyncio.Semapho
 
                 extracted.append({
                     'category': category,
-                    'source': url,
+                    'source': clean_feed_url,
                     'link': link,
                     'raw_title': title[:250],
                     'raw_text': cleaned_body[:320],
@@ -1878,7 +1912,7 @@ async def publish_roundup_digest_post(
         used_tags.add(CATEGORY_HASHTAGS.get(cat_id, "#اخبار"))
         headline_clean = sanitize_telegram_html(sel.headline_persian)
         first_sentence = sanitize_telegram_html((sel.summary_persian or "").split(".")[0].strip())
-        news_url = html.escape(orig_item.get('link', STORE_BASE_URL))
+        news_url = html.escape(sanitize_plain_url(orig_item.get('link', STORE_BASE_URL)))
 
         lines.append(f"{emoji} <b>{headline_clean}</b>")
         if first_sentence:
@@ -1948,12 +1982,12 @@ async def process_and_publish_batch(
     all_fetched = [
         {
             'id': r[0],
-            'link': r[1],
+            'link': sanitize_plain_url(r[1]),
             'category': r[2],
             'source': r[3],
             'title': r[4],
             'text': r[5][:320],
-            'image_url': r[6],
+            'image_url': sanitize_plain_url(r[6]) if r[6] else None,
             'has_video_or_audio': bool(r[7]),
             'source_count': r[8],
             'is_breaking_candidate': bool(r[9])
@@ -2043,7 +2077,7 @@ async def process_and_publish_batch(
         main_cat_hashtag = CATEGORY_HASHTAGS.get(cat_id, "#اخبار")
         final_caption = format_rich_news_post(sel, orig_item, main_cat_hashtag)
 
-        news_link = orig_item.get('link', STORE_BASE_URL)
+        news_link = sanitize_plain_url(orig_item.get('link', STORE_BASE_URL))
         video_url = pick_video_url(orig_item)
         keyboard = [
             [InlineKeyboardButton("❤️ پسندیدن این خبر (0)", callback_data=f"like_{orig_item['id']}")],
@@ -2122,7 +2156,8 @@ async def publish_daily_digest_if_due():
     by_cat = {"gaming": [], "technology": [], "hardware": [], "ent": []}
     for cat, headline, url in rows:
         clean_h = sanitize_telegram_html(headline)
-        entry_line = f"• <a href=\"{html.escape(url)}\">{clean_h}</a>"
+        clean_u = sanitize_plain_url(url)
+        entry_line = f"• <a href=\"{html.escape(clean_u)}\">{clean_h}</a>"
         if cat == "gaming" and len(by_cat["gaming"]) < 5:
             by_cat["gaming"].append(entry_line)
         elif cat == "technology" and len(by_cat["technology"]) < 3:
