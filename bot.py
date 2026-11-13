@@ -20,7 +20,7 @@ from google import genai
 from google.genai import types
 from openai import AsyncOpenAI
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
-from telegram.ext import Application, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 try:
     from telegram import ReplyParameters
@@ -29,6 +29,7 @@ except ImportError:
 
 # ================= ۱. تنظیمات اصلی و کلیدهای API =================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
+ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0") or 0)
 
 GEMINI_API_KEYS = [
     k.strip() for k in [
@@ -46,16 +47,18 @@ NAVASAN_API_KEY = os.environ.get("NAVASAN_API_KEY", "")
 BRSAPI_KEY = os.environ.get("BRSAPI_KEY", "")
 
 TARGET_CHANNEL = '@jazebestore'
+CHANNEL_USERNAME_CLEAN = TARGET_CHANNEL.lstrip('@')
 STORE_BASE_URL = 'https://jazebestore.com'
 CHANNEL_SIGNATURE = "\n\n🎮 @jazebestore"
 DB_PATH = 'rss_news_history.db'
 
-# تنظیمات زمانی: بررسی اخبار فوری هر ۳ دقیقه | چرخه کامل هر ۳۰ دقیقه | حداکثر ۳۵ کاندیدا در هر پرامپت
+# تنظیمات زمانی و بهینه‌سازی ضدخستگی اعلان (Smart Digest Batching)
 BREAKING_CHECK_INTERVAL_SECONDS = 180
 REGULAR_CYCLE_SECONDS = 1800
 MAX_NEWS_PER_CYCLE = 12
-MAX_BREAKING_PER_CYCLE = 3
-MAX_CANDIDATES_FOR_AI = 35
+MAX_STANDALONE_POSTS_PER_CYCLE = 3    # فقط ۳ خبر برتر به صورت پست مستقل منتشر می‌شوند و مابقی در بسته مرور سریع تجمیع می‌شوند
+MAX_BREAKING_PER_CYCLE = 2
+MAX_CANDIDATES_FOR_AI = 24            # کاهش هوشمند کاندیداها پس از پیش‌فیلتر محلی برای جلوگیری از خطای 413 در Groq
 SEMANTIC_SIMILARITY_THRESHOLD = 0.78
 CLUSTER_SIMILARITY_THRESHOLD = 0.72
 HYPE_HALF_LIFE_HOURS = 18.0
@@ -63,16 +66,17 @@ HYPE_HALF_LIFE_HOURS = 18.0
 # تنظیمات افزونه‌های روزانه و تعاملی
 TEHRAN = ZoneInfo("Asia/Tehran")
 USD_POST_HOUR = 11
-USD_WINDOW_END_HOUR = 14
+USD_WINDOW_END_HOUR = 24
 DAILY_REC_HOUR = 12
-DAILY_REC_WINDOW_END_HOUR = 17
+DAILY_REC_WINDOW_END_HOUR = 24
+POLL_MIN_HYPE = 8
 MEME_MAX_PER_CYCLE = 2
 MEME_MIN_HYPE = 6
 MEME_STANDALONE_GAP_MIN = 90
 ARTICLE_MAX_CHARS = 1800
 ENRICH_CHUNK = 3
 
-UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 REDDIT_UA = {"User-Agent": "jazebe-news-bot/1.0"}
 MEME_SUBREDDITS = {
     "gaming", "memes", "pcmasterrace", "playstation", "ps5", "xbox", "nintendo", "nintendoswitch",
@@ -123,6 +127,13 @@ BREAKING_TRIGGER_KEYWORDS = [
     "delayed", "canceled", "cancelled", "state of play", "playstation showcase",
     "xbox games showcase", "gta vi", "gta 6", "ps5 pro", "nintendo switch 2",
     "rtx 5090", "rtx 5080", "فوری", "به‌طور رسمی معرفی شد", "تاریخ انتشار", "تریلر رسمی"
+]
+
+HIGH_VALUE_KEYWORDS = [
+    "gta", "playstation", "ps5", "ps6", "xbox", "nintendo", "switch 2", "steam", "valve",
+    "nvidia", "rtx", "amd", "ryzen", "intel", "apple", "iphone", "openai", "gpt", "gemini",
+    "claude", "ai", "bitcoin", "ethereum", "trailer", "release date", "delayed", "exclusive",
+    "update", "patch", "remake", "sequel", "playstation plus", "game pass", "rockstar", "sony"
 ]
 
 CATEGORIZED_RSS_SOURCES = {
@@ -250,7 +261,7 @@ CATEGORIZED_RSS_SOURCES = {
     ]
 }
 
-# ================= ۲. راه‌اندازی دیتابیس و مدیریت چرخه حیات خبر =================
+# ================= ۲. راه‌اندازی دیتابیس، آمار تعامل و مدیریت چرخه حیات خبر =================
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 os.makedirs('temp_media', exist_ok=True)
 provider_rotation_index = 0
@@ -278,15 +289,29 @@ def init_db():
                     published_category TEXT,
                     published_headline TEXT,
                     related_entity TEXT,
+                    telegram_message_id INTEGER,
+                    likes_count INTEGER DEFAULT 0,
                     discovered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     published_at TIMESTAMP
                 )''')
+    # افزودن ستون‌های جدید در صورت وجود دیتابیس قدیمی
+    for col_def in ("telegram_message_id INTEGER", "likes_count INTEGER DEFAULT 0"):
+        try:
+            c.execute(f"ALTER TABLE news_items ADD COLUMN {col_def}")
+        except sqlite3.OperationalError:
+            pass
+
     c.execute('''CREATE TABLE IF NOT EXISTS hype_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     entity_name TEXT,
                     category TEXT,
                     score REAL DEFAULT 1.0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS category_engagement (
+                    category TEXT PRIMARY KEY,
+                    published_posts INTEGER DEFAULT 0,
+                    total_likes INTEGER DEFAULT 0
                 )''')
     c.execute('''CREATE TABLE IF NOT EXISTS bot_metadata (
                     key TEXT PRIMARY KEY,
@@ -328,7 +353,15 @@ def update_news_status(item_ids: list[int], new_status: str, increment_retry: bo
     conn.commit()
     conn.close()
 
-def save_published_news_details(item_id: int, fingerprint: str, pub_cat: str, pub_headline: str, related_entity: str, ai_payload: dict):
+def save_published_news_details(
+    item_id: int,
+    fingerprint: str,
+    pub_cat: str,
+    pub_headline: str,
+    related_entity: str,
+    ai_payload: dict,
+    telegram_msg_id: int = 0
+):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
@@ -339,13 +372,82 @@ def save_published_news_details(item_id: int, fingerprint: str, pub_cat: str, pu
             published_category = ?,
             published_headline = ?,
             related_entity = ?,
-            ai_payload_json = ?
+            ai_payload_json = ?,
+            telegram_message_id = ?
         WHERE id = ?
-    """, (fingerprint, pub_cat, pub_headline, related_entity, json.dumps(ai_payload, ensure_ascii=False), item_id))
+    """, (
+        fingerprint,
+        pub_cat,
+        pub_headline,
+        related_entity,
+        json.dumps(ai_payload, ensure_ascii=False),
+        telegram_msg_id or None,
+        item_id
+    ))
+    c.execute("""
+        INSERT INTO category_engagement (category, published_posts, total_likes)
+        VALUES (?, 1, 0)
+        ON CONFLICT(category) DO UPDATE SET published_posts = published_posts + 1
+    """, (pub_cat,))
     conn.commit()
     conn.close()
 
-# ================= ۳. زبان فارسی، تاریخ شمسی و ویرایش نگارشی =================
+def record_category_like(item_id: int):
+    """ثبت کلیک لایک در دیتابیس برای سنجش نرخ تعامل واقعی هر دسته‌بندی"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE news_items SET likes_count = COALESCE(likes_count, 0) + 1 WHERE id = ?", (item_id,))
+    c.execute("SELECT published_category FROM news_items WHERE id = ?", (item_id,))
+    row = c.fetchone()
+    if row and row[0]:
+        c.execute("""
+            INSERT INTO category_engagement (category, published_posts, total_likes)
+            VALUES (?, 1, 1)
+            ON CONFLICT(category) DO UPDATE SET total_likes = total_likes + 1
+        """, (row[0],))
+    conn.commit()
+    conn.close()
+
+def get_category_engagement_weights() -> dict[str, float]:
+    """محاسبه ضریب جذابیت هر دسته‌بندی بر اساس نسبت لایک به پست‌های منتشرشده"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT category, published_posts, total_likes FROM category_engagement")
+    rows = c.fetchall()
+    conn.close()
+    weights = {}
+    for cat, posts, likes in rows:
+        if posts and posts > 0:
+            ratio = likes / posts
+            weights[cat] = min(3.0, round(ratio * 1.5, 2))
+    return weights
+
+def get_related_channel_archive_links(related_entity: str, exclude_item_id: int, limit: int = 2) -> list[tuple[str, str]]:
+    """پیدا کردن پست‌های قبلی منتشرشده در کانال درباره همین موضوع برای اتصال آرشیو موضوعی (Topic Hub)"""
+    if not related_entity or len(related_entity.strip()) < 3:
+        return []
+    clean_ent = related_entity.strip().lower()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        SELECT published_headline, telegram_message_id
+        FROM news_items
+        WHERE status = 'published'
+          AND lower(related_entity) = ?
+          AND id != ?
+          AND telegram_message_id IS NOT NULL
+          AND published_at >= datetime('now', '-14 days')
+        ORDER BY id DESC LIMIT ?
+    """, (clean_ent, exclude_item_id, limit))
+    rows = c.fetchall()
+    conn.close()
+    links = []
+    for headline, msg_id in rows:
+        if headline and msg_id:
+            links.append((headline, f"https://t.me/{CHANNEL_USERNAME_CLEAN}/{msg_id}"))
+    return links
+
+# ================= ۳. زبان فارسی، تاریخ شمسی (چندشنبه) و ویرایش نگارشی =================
 _FA_DIGITS = "۰۱۲۳۴۵۶۷۸۹"
 _PERSIAN = "\u0600-\u06FF"
 JALALI_MONTHS = ["فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور",
@@ -353,6 +455,15 @@ JALALI_MONTHS = ["فروردین", "اردیبهشت", "خرداد", "تیر", "
 GREG_MONTHS_FA = ["ژانویه", "فوریه", "مارس", "آوریل", "مه", "ژوئن",
                   "ژوئیه", "اوت", "سپتامبر", "اکتبر", "نوامبر", "دسامبر"]
 WEEKDAYS_FA = ["دوشنبه", "سه‌شنبه", "چهارشنبه", "پنج‌شنبه", "جمعه", "شنبه", "یکشنبه"]
+WEEKDAY_ORDER_FA = {
+    "شنبه": "اولین روز هفته",
+    "یکشنبه": "دومین روز هفته",
+    "دوشنبه": "سومین روز هفته",
+    "سه‌شنبه": "چهارمین روز هفته",
+    "چهارشنبه": "پنجمین روز هفته",
+    "پنج‌شنبه": "ششمین روز هفته",
+    "جمعه": "هفتمین روز هفته (تعطیل رسمی)",
+}
 
 def get_current_tehran_time() -> datetime:
     return datetime.now(TEHRAN)
@@ -387,6 +498,7 @@ def format_dates(dt: datetime) -> dict:
     weekday = WEEKDAYS_FA[dt.weekday()]
     return {
         "weekday": weekday,
+        "weekday_order": WEEKDAY_ORDER_FA.get(weekday, ""),
         "jalali": f"{to_fa_digits(jd)} {JALALI_MONTHS[jm - 1]} {to_fa_digits(jy)}",
         "gregorian": f"{to_fa_digits(dt.day)} {GREG_MONTHS_FA[dt.month - 1]} {to_fa_digits(dt.year)}",
         "date_key": dt.strftime("%Y-%m-%d"),
@@ -406,14 +518,16 @@ def persian_polish(text: str) -> str:
 
 def polish_selected(sel) -> None:
     for field in ("headline_persian", "summary_persian", "background_persian",
-                  "image_alt_persian", "av_transcript_summary_persian"):
+                  "before_after_persian", "image_alt_persian", "av_transcript_summary_persian", "poll_question"):
         val = getattr(sel, field, "")
         if val:
             setattr(sel, field, persian_polish(val))
     if getattr(sel, "key_points_persian", None):
         sel.key_points_persian = [persian_polish(p) for p in sel.key_points_persian]
+    if getattr(sel, "poll_options", None):
+        sel.poll_options = [persian_polish(o) for o in sel.poll_options]
 
-# ================= ۴. موتور Embedding و محاسبه Cosine Similarity =================
+# ================= ۴. موتور Embedding، پیش‌فیلتر محلی و خوشه‌بندی معنایی =================
 def compute_local_ngram_embedding(text: str, dim: int = 256) -> list[float]:
     clean = re.sub(r'[^\w\s]', ' ', text.lower())
     tokens = [t for t in clean.split() if len(t) > 2]
@@ -440,6 +554,29 @@ def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
     if norm_a == 0.0 or norm_b == 0.0:
         return 0.0
     return dot / (norm_a * norm_b)
+
+def score_candidate_locally(item: dict, cat_weights: dict[str, float]) -> float:
+    """
+    پیش‌فیلتر هوشمند محلی قبل از ارسال به AI:
+    امتیازدهی بر اساس تعدد منابع، اخبار فوری، رسانه، کلمات کلیدی داغ و نرخ تعامل واقعی دسته‌بندی.
+    """
+    score = 1.0
+    if item.get('is_breaking_candidate'):
+        score += 5.0
+    score += (item.get('source_count', 1) - 1) * 2.5
+    if item.get('image_url'):
+        score += 1.0
+    if item.get('has_video_or_audio'):
+        score += 1.5
+
+    low_text = f"{item.get('title', '')} {item.get('text', '')}".lower()
+    kw_hits = sum(1 for kw in HIGH_VALUE_KEYWORDS if kw in low_text)
+    score += min(4.0, kw_hits * 0.8)
+
+    # اعمال ضریب تعامل واقعی مخاطبان در هر دسته‌بندی
+    cat = item.get('category', 'general_news')
+    score += cat_weights.get(cat, 0.5)
+    return round(score, 2)
 
 async def run_semantic_clustering_and_deduplication():
     conn = sqlite3.connect(DB_PATH)
@@ -563,7 +700,7 @@ def detect_24h_trends(top_n: int = 8) -> list[dict]:
     conn.close()
     return [{"entity": r[0], "mentions": r[1], "score": round(r[2], 1)} for r in rows]
 
-# ================= ۶. توابع پاک‌سازی، Sanitization HTML و ارسال یکپارچه (بدون تکرار) =================
+# ================= ۶. توابع پاک‌سازی، Sanitization HTML و ارسال یکپارچه =================
 def clean_raw_text(text: str) -> str:
     if not text:
         return ""
@@ -681,11 +818,6 @@ def _reply_kwargs(message_id):
 
 async def send_post(session, text, image_url=None, reply_markup=None, silent=False,
                     reply_to=None, filename="post.jpg", link_preview=False):
-    """
-    ارسال تضمینی در قالب یک پست واحد (بدون شکستن به دو پیام و بدون تکرار تیتر):
-    - اگر متن زیر ۱۰۰۰ کاراکتر باشد، مستقیماً با send_photo ارسال می‌شود.
-    - اگر متن بالای ۱۰۰۰ کاراکتر باشد، به صورت یک پیام واحد با نمایش بزرگ تصویر در بالای متن (LinkPreviewOptions) منتشر می‌شود.
-    """
     text = _fit_lines(text, 4000)
 
     async def send_text_single(body, parse_mode, markup, reply_id, media_url=None):
@@ -720,7 +852,6 @@ async def send_post(session, text, image_url=None, reply_markup=None, silent=Fal
                 **_reply_kwargs(reply_id)
             )
 
-    # ۱. برای کپشن‌های زیر ۱۰۰۰ کاراکتر: ارسال مستقیم عکس و متن یکجا
     if image_url and _visible_len(text) <= 1000:
         img_path = await download_image_from_url(session, image_url, filename)
         try:
@@ -738,15 +869,34 @@ async def send_post(session, text, image_url=None, reply_markup=None, silent=Fal
                 except OSError:
                     pass
 
-    # ۲. برای خبرهای مفصل (بالای ۱۰۰۰ کاراکتر) یا زمانی که فایل عکس دانلود نشد: یک پست واحد با تصویر بزرگ در بالای متن
     try:
         return await send_text_single(text, "HTML", reply_markup, reply_to, media_url=image_url)
     except Exception as err:
         err_low = str(err).lower()
         if "entities" in err_low or "parse" in err_low:
             return await send_text_single(_strip_tags(text), None, reply_markup, reply_to, media_url=image_url)
-        # اگر لینک تصویر در پیش‌نمایش پذیرفته نشد، به‌صورت متنی ارسال شود
         return await send_text_single(text, "HTML", reply_markup, reply_to, media_url=None)
+
+async def send_interactive_poll_reply(sel, reply_to_msg_id: int, silent: bool = False):
+    """ارسال نظرسنجی تعاملی تلگرام (send_poll) زیر اخبار داغ با هایپ بالا"""
+    if not sel.poll_question or not sel.poll_options or len(sel.poll_options) < 2:
+        return
+    clean_q = _strip_tags(sel.poll_question)[:280]
+    clean_opts = [_strip_tags(opt)[:95] for opt in sel.poll_options[:3] if opt.strip()]
+    if len(clean_opts) < 2:
+        return
+    try:
+        await bot.send_poll(
+            chat_id=TARGET_CHANNEL,
+            question=f"📊 نظر شما چیست؟ {clean_q}",
+            options=clean_opts,
+            is_anonymous=True,
+            disable_notification=silent,
+            **_reply_kwargs(reply_to_msg_id)
+        )
+        print(f"📊 نظرسنجی تعاملی زیر پست {reply_to_msg_id} منتشر شد.")
+    except Exception as e:
+        print(f"⚠️ خطا در ارسال نظرسنجی: {e}")
 
 # ================= ۷. پین کردن تا ۰۰:۰۰ =================
 def _pins_load() -> list:
@@ -763,7 +913,7 @@ async def pin_post(message_id: int):
         set_metadata("pinned_posts", json.dumps(pins))
         print(f"📌 پست {message_id} پین شد (تا ۰۰:۰۰ همین روز).")
     except Exception as e:
-        print(f"⚠️ پین ناموفق (ربات باید ادمین با دسترسی Pin Messages باشد): {e}")
+        print(f"⚠️ پین ناموفق (ربات باید در کانال ادمین با دسترسی Pin Messages باشد): {e}")
 
 async def unpin_expired_pins(session=None):
     today = get_current_tehran_time().strftime("%Y-%m-%d")
@@ -791,25 +941,27 @@ class SelectedNewsItem(BaseModel):
     selected_id: int = Field(description="ID of the selected news candidate")
     category_id: str = Field(description="One of: gaming, technology, hardware, crypto, film_tv, internet_culture, fun_meme, music, general_news")
     verification_status: str = Field(description="Must be one of: 'خبر رسمی', 'گزارش رسانه معتبر', 'شایعه و لیک', 'خبر تأییدنشده'")
-    confidence_score: int = Field(default=85, description="Confidence percentage between 40 and 100 based on source reliability and confirmation")
-    is_breaking: bool = Field(default=False, description="True if this is major breaking news requiring immediate attention")
-    is_new_game_release: bool = Field(default=False, description="True if the news is about a new game release or pre-order announcement")
-    series_name: str = Field(default="", description="Optional recurring series name if applicable: 'Game of the Week', 'Movie of the Week', 'Tech Breakdown', 'Weekly Gaming News', 'Best Hardware Deals', 'This Week in Gaming', or empty string")
-    headline_persian: str = Field(description="Descriptive, clear Persian headline without HTML tags or emojis")
-    summary_persian: str = Field(description="Detailed, accurate, well-edited Persian summary (4-6 short sentences) answering who/what/when/where/why with every concrete name, number, date, platform and price from the source; wrap 1 to 4 key facts in <b>...</b>")
-    key_points_persian: list[str] = Field(description="3 to 5 short, factual bullet points in Persian (e.g., 'تاریخ انتشار: ...', 'پلتفرم‌ها: ...', 'قیمت: ...')")
-    background_persian: str = Field(default="", description="1-2 sentence Persian background/context supported by the source text, or empty string")
-    image_alt_persian: str = Field(default="", description="Clear Persian visual description of the news context/image for blind/screen-reader users")
-    av_transcript_summary_persian: str = Field(default="", description="If the source contains video/trailer/audio, provide a clear Persian text transcript/summary of what happens or is said in the video for deaf users")
-    topic_hashtags: list[str] = Field(description="2 to 3 specific Persian hashtags starting with # using underscores")
+    confidence_score: int = Field(default=85, description="Confidence percentage between 40 and 100")
+    is_breaking: bool = Field(default=False, description="True if major breaking news")
+    series_name: str = Field(default="", description="Optional series: 'Game of the Week', 'Movie of the Week', 'Tech Breakdown', 'Weekly Gaming News', 'Best Hardware Deals', 'This Week in Gaming', or ''")
+    headline_persian: str = Field(description="Descriptive Persian headline without emojis/HTML")
+    summary_persian: str = Field(description="Detailed Persian summary (3-5 short sentences) with 1-3 key facts in <b>...</b>")
+    key_points_persian: list[str] = Field(description="2 to 4 short factual bullet points in Persian")
+    background_persian: str = Field(default="", description="1-2 sentence Persian background context, or ''")
+    before_after_persian: str = Field(default="", description="Optional concise 'Before vs After' comparison in Persian when news involves a delay, price change, spec upgrade, or policy shift, else ''")
+    image_alt_persian: str = Field(default="", description="1-sentence Persian visual description for blind/screen-reader users")
+    av_transcript_summary_persian: str = Field(default="", description="Concise Persian text summary of video/audio if present")
+    poll_question: str = Field(default="", description="Short engaging Persian poll question for high-hype stories (hype_score >= 8), else ''")
+    poll_options: list[str] = Field(default_factory=list, description="2 to 3 short Persian poll answer options if poll_question is provided")
+    topic_hashtags: list[str] = Field(description="2 to 3 specific Persian hashtags starting with #")
     topic_fingerprint: str = Field(description="1-sentence English summary for deduplication")
-    related_game: str = Field(default="", description="Exact English canonical name of the related game, service, or console, otherwise empty string")
-    hype_score: int = Field(default=5, description="Hype and viral importance score from 1 to 10")
+    related_game: str = Field(default="", description="Exact English canonical name of the related game/service/console (e.g. 'GTA VI', 'PS5 Pro'), else ''")
+    hype_score: int = Field(default=5, description="Hype score from 1 to 10")
 
 class BatchProcessResult(BaseModel):
     selected_news: list[SelectedNewsItem]
 
-# ================= ۹. موتور پردازش ۳ گانه AI با اعتبارسنجی Pydantic و Retry =================
+# ================= ۹. موتور پردازش ۳ گانه AI با پایش سلامت و اعتبارسنجی Pydantic =================
 JSON_SCHEMA_INSTRUCTION = """
 Respond ONLY with a valid JSON object matching this exact schema (no markdown fences):
 {
@@ -820,18 +972,19 @@ Respond ONLY with a valid JSON object matching this exact schema (no markdown fe
       "verification_status": "خبر رسمی",
       "confidence_score": 95,
       "is_breaking": false,
-      "is_new_game_release": false,
       "series_name": "",
       "headline_persian": "تأیید تاریخ انتشار بازی GTA VI توسط Rockstar",
       "summary_persian": "شرکت Rockstar به‌طور رسمی اعلام کرد که <b>پاییز سال جاری</b> نسخه جدید این مجموعه عرضه خواهد شد.",
       "key_points_persian": [
         "پلتفرم‌های مقصد: PlayStation 5 و Xbox Series X/S",
-        "وضعیت توسعه: ورود به مرحله پولیش نهایی",
-        "ناشر: Rockstar Games"
+        "وضعیت توسعه: ورود به مرحله پولیش نهایی"
       ],
       "background_persian": "این عنوان پس از چند بار تأخیر، حالا وارد مرحله‌ی پولیش نهایی شده است.",
-      "image_alt_persian": "تصویر تبلیغاتی رسمی بازی GTA VI با نمایش شخصیت‌های اصلی در فضای شهری",
+      "before_after_persian": "قبل: بازه انتشار نامشخص | اکنون: تأیید رسمی عرضه در پاییز امسال",
+      "image_alt_persian": "تصویر تبلیغاتی رسمی بازی GTA VI با نمایش شخصیت‌های اصلی",
       "av_transcript_summary_persian": "",
+      "poll_question": "آیا به عرضه بدون تأخیر مجدد GTA VI در پاییز امسال امیدوارید؟",
+      "poll_options": ["بله، قطعاً منتشر می‌شود", "احتمال تأخیر دوباره وجود دارد"],
       "topic_hashtags": ["#راکستار", "#جی_تی_ای"],
       "topic_fingerprint": "Rockstar officially confirms GTA VI release window",
       "related_game": "GTA VI",
@@ -854,6 +1007,10 @@ def _extract_json_from_llm_content(raw_content: str | None) -> dict:
         cleaned = cleaned[start:end + 1]
     return json.loads(cleaned)
 
+def _record_api_health(provider_name: str, status_text: str):
+    ts = get_current_tehran_time().strftime("%H:%M")
+    set_metadata(f"api_health_{provider_name}", f"{status_text} ({ts})")
+
 async def call_gemini_provider(prompt: str) -> BatchProcessResult | None:
     for key_idx, api_key in enumerate(GEMINI_API_KEYS, start=1):
         temp_client = genai.Client(api_key=api_key)
@@ -873,13 +1030,15 @@ async def call_gemini_provider(prompt: str) -> BatchProcessResult | None:
                     )
                     raw_dict = _extract_json_from_llm_content(response.text)
                     validated = BatchProcessResult.model_validate(raw_dict)
-                    print(f"✅ موفقیت و اعتبارسنجی Schema با Gemini (کلید #{key_idx} | {model_name})")
+                    _record_api_health("gemini", f"✅ سالم (کلید #{key_idx} - {model_name})")
+                    print(f"✅ موفقیت با Gemini (کلید #{key_idx} | {model_name})")
                     return validated
                 except (ValidationError, json.JSONDecodeError, ValueError) as ve:
-                    print(f"⚠️ خطای اعتبارسنجی Schema در Gemini: {ve}")
+                    print(f"⚠️ خطای Schema در Gemini: {ve}")
                     await asyncio.sleep(1)
                 except Exception as e:
-                    print(f"⚠️ خطا در ارتباط با Gemini (کلید #{key_idx} | {model_name}): {e}")
+                    _record_api_health("gemini", f"⚠️ خطا ({str(e)[:45]})")
+                    print(f"⚠️ خطا در Gemini (کلید #{key_idx} | {model_name}): {e}")
                     await asyncio.sleep(1.5)
                     break
     return None
@@ -903,12 +1062,14 @@ async def call_groq_provider(prompt: str) -> BatchProcessResult | None:
                     content = completion.choices[0].message.content if completion.choices else None
                     raw_dict = _extract_json_from_llm_content(content)
                     validated = BatchProcessResult.model_validate(raw_dict)
-                    print(f"✅ موفقیت و اعتبارسنجی Schema با Groq (کلید #{key_idx} | {model_name})")
+                    _record_api_health("groq", f"✅ سالم (کلید #{key_idx} - {model_name})")
+                    print(f"✅ موفقیت با Groq (کلید #{key_idx} | {model_name})")
                     return validated
                 except (ValidationError, json.JSONDecodeError, ValueError) as ve:
-                    print(f"⚠️ خطای اعتبارسنجی Schema در Groq ({model_name}): {ve}")
+                    print(f"⚠️ خطای Schema در Groq ({model_name}): {ve}")
                     await asyncio.sleep(1)
                 except Exception as e:
+                    _record_api_health("groq", f"⚠️ خطا ({str(e)[:45]})")
                     print(f"⚠️ خطا در Groq (کلید #{key_idx} | {model_name}): {e}")
                     await asyncio.sleep(1)
                     break
@@ -932,12 +1093,14 @@ async def call_openrouter_provider(prompt: str) -> BatchProcessResult | None:
                     content = completion.choices[0].message.content if completion.choices else None
                     raw_dict = _extract_json_from_llm_content(content)
                     validated = BatchProcessResult.model_validate(raw_dict)
-                    print(f"✅ موفقیت و اعتبارسنجی Schema با OpenRouter (کلید #{key_idx} | {model_name})")
+                    _record_api_health("openrouter", f"✅ سالم (کلید #{key_idx} - {model_name})")
+                    print(f"✅ موفقیت با OpenRouter (کلید #{key_idx} | {model_name})")
                     return validated
                 except (ValidationError, json.JSONDecodeError, ValueError) as ve:
-                    print(f"⚠️ خطای اعتبارسنجی Schema در OpenRouter ({model_name}): {ve}")
+                    print(f"⚠️ خطای Schema در OpenRouter ({model_name}): {ve}")
                     await asyncio.sleep(1)
                 except Exception as e:
+                    _record_api_health("openrouter", f"⚠️ خطا ({str(e)[:45]})")
                     print(f"⚠️ خطا در OpenRouter (کلید #{key_idx} | {model_name}): {e}")
                     await asyncio.sleep(1)
                     break
@@ -1011,7 +1174,7 @@ async def ask_ai_json(prompt: str, model_cls, temperature: float = 0.5):
             return result
     return None
 
-# ================= ۱۰. پست روزانه قیمت دلار (ساعت ۱۱) + بیتی از سعدی =================
+# ================= ۱۰. پست روزانه قیمت دلار + مقایسه با روز قبل + بیتی از سعدی =================
 FALLBACK_VERSES = [
     ("بنی‌آدم اعضای یکدیگرند", "که در آفرینش ز یک گوهرند", "گلستان، باب اول، حکایت ۱۰"),
     ("چو عضوی به درد آورد روزگار", "دگر عضوها را نماند قرار", "گلستان، باب اول، حکایت ۱۰"),
@@ -1072,7 +1235,7 @@ def _usd_ok(v) -> bool:
     return isinstance(v, int) and 20_000 <= v <= 3_000_000
 
 async def _usd_tgju(session):
-    for url in ("[https://call5.tgju.org/ajax.json](https://call5.tgju.org/ajax.json)", "[https://call4.tgju.org/ajax.json](https://call4.tgju.org/ajax.json)"):
+    for url in ("[https://call5.tgju.org/ajax.json](https://call5.tgju.org/ajax.json)", "[https://call4.tgju.org/ajax.json](https://call4.tgju.org/ajax.json)", "[https://call3.tgju.org/ajax.json](https://call3.tgju.org/ajax.json)"):
         try:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
                 if resp.status != 200:
@@ -1093,6 +1256,39 @@ async def _usd_alanchand(session):
         text = to_en_digits(BeautifulSoup(page, "html.parser").get_text(" ", strip=True))
         m = re.search(r"دلار[^\d]{0,120}?(\d{2,3},\d{3})", text)
         return int(m.group(1).replace(",", "")) if m else None
+    except Exception:
+        return None
+
+async def _usd_tetherland(session):
+    try:
+        async with session.get("[https://api.tetherland.com/currencies](https://api.tetherland.com/currencies)", timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json(content_type=None)
+        price = data["data"]["currencies"]["USDT"]["price"]
+        return int(float(price))
+    except Exception:
+        return None
+
+async def _usd_nobitex(session):
+    try:
+        async with session.get("[https://api.nobitex.ir/v3/orderbook/USDTIRT](https://api.nobitex.ir/v3/orderbook/USDTIRT)", timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json(content_type=None)
+        last_trade = int(float(data.get("lastTradePrice", 0)))
+        return last_trade // 10 if last_trade > 3_000_000 else last_trade
+    except Exception:
+        return None
+
+async def _usd_wallex(session):
+    try:
+        async with session.get("[https://api.wallex.ir/v1/markets](https://api.wallex.ir/v1/markets)", timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json(content_type=None)
+        stats = data["result"]["symbols"]["USDTTMN"]["stats"]
+        return int(float(stats["lastPrice"]))
     except Exception:
         return None
 
@@ -1123,8 +1319,15 @@ async def _usd_brsapi(session):
     return None
 
 async def get_usd_toman(session):
-    fetchers = [("tgju.org", _usd_tgju), ("alanchand.com", _usd_alanchand),
-                ("navasan.tech", _usd_navasan), ("brsapi.ir", _usd_brsapi)]
+    fetchers = [
+        ("tgju.org", _usd_tgju),
+        ("alanchand.com", _usd_alanchand),
+        ("tetherland.com", _usd_tetherland),
+        ("nobitex.ir", _usd_nobitex),
+        ("wallex.ir", _usd_wallex),
+        ("navasan.tech", _usd_navasan),
+        ("brsapi.ir", _usd_brsapi),
+    ]
     results = await asyncio.gather(*(f(session) for _, f in fetchers), return_exceptions=True)
     got = [(name, v) for (name, _), v in zip(fetchers, results) if _usd_ok(v)]
     if not got:
@@ -1134,18 +1337,28 @@ async def get_usd_toman(session):
 def _fa_money(value: int) -> str:
     return to_fa_digits(f"{value:,}").replace(",", "٬")
 
-def build_usd_post(value: int, sources: list, verse: dict, dt: datetime) -> str:
+def build_usd_post(value: int, sources: list, verse: dict, dt: datetime, prev_value: int = 0) -> str:
     d = format_dates(dt)
     lines = [
         "💵 <b>قیمت امروز دلار آمریکا</b> | بازار آزاد",
-        f"📅 <b>{d['weekday']}</b>، {d['jalali']} | {d['gregorian']}",
+        f"📅 امروز: <b>{d['weekday']}</b> ({d['weekday_order']}) | {d['jalali']} | {d['gregorian']}",
         "",
-        f"💰 هر دلار آمریکا: <b>{_fa_money(value)} تومان</b>",
+        f"💰 نرخ هر دلار آمریکا: <b>{_fa_money(value)} تومان</b>",
     ]
+    # پایش تغییرات قیمت دلار نسبت به روز قبل
+    if prev_value > 0:
+        diff = value - prev_value
+        if diff > 0:
+            lines.append(f"📈 تغییر نسبت به روز قبل: <b>🔺 +{_fa_money(diff)} تومان</b> (نرخ قبلی: {_fa_money(prev_value)} تومان)")
+        elif diff < 0:
+            lines.append(f"📉 تغییر نسبت به روز قبل: <b>🔻 -{_fa_money(abs(diff))} تومان</b> (نرخ قبلی: {_fa_money(prev_value)} تومان)")
+        else:
+            lines.append(f"➖ تغییر نسبت به روز قبل: <b>بدون تغییر</b> ({_fa_money(prev_value)} تومان)")
+
     if len(sources) >= 2:
         detail = " ، ".join(f"{html.escape(n)}: {_fa_money(v)}" for n, v in sources)
         lines.append(f"🔎 نرخ گزارش‌شده در منابع: {detail}")
-        lines.append("ℹ️ عدد اعلام‌شده، میانه‌ی نرخ منابع بالاست.")
+        lines.append("ℹ️ عدد اعلام‌شده، میانه‌ی نرخ منابع معتبر بالاست.")
     else:
         lines.append(f"🔎 منبع: {html.escape(sources[0][0])}")
     lines.append("ℹ️ نرخ‌ها لحظه‌ای‌اند و ممکن است میان صرافی‌ها اندکی تفاوت داشته باشند.")
@@ -1170,11 +1383,16 @@ async def publish_daily_usd_post_if_due(session):
         print("⚠️ قیمت دلار از هیچ منبعی دریافت نشد؛ در چرخه‌ی بعد دوباره تلاش می‌شود.")
         return
     value, sources = got
+    prev_raw = get_metadata("last_usd_rate", "0")
+    prev_value = int(prev_raw) if prev_raw.isdigit() else 0
+
     verse = await fetch_saadi_verse(session)
-    text = build_usd_post(value, sources, verse, current_tehran)
+    text = build_usd_post(value, sources, verse, current_tehran, prev_value=prev_value)
     markup = InlineKeyboardMarkup([[InlineKeyboardButton("📜 خواندن شعر کامل در گنجور", url=verse["url"])]])
     msg = await send_post(session, text, reply_markup=markup, silent=False)
+
     set_metadata("last_usd_post_date", today)
+    set_metadata("last_usd_rate", str(value))
     await pin_post(msg.message_id)
     print(f"✅ پست دلار منتشر شد: {value:,} تومان")
 
@@ -1340,7 +1558,7 @@ def build_daily_rec_post(rec: DailyRec, info, genre_fa: str, occasion, dt: datet
     m, mu = rec.movie, rec.music
     e = html.escape
     lines = [f"🌍 <b>{e(persian_polish(occ_fa))}</b>" if occ_fa else "🗓 <b>پیشنهاد فرهنگی امروز</b>",
-             f"📅 <b>{d['weekday']}</b>، {d['jalali']} | {d['gregorian']}"]
+             f"📅 امروز: <b>{d['weekday']}</b> ({d['weekday_order']}) | {d['jalali']} | {d['gregorian']}"]
     if rec.occasion_note_persian:
         lines.append(f"<blockquote>{e(persian_polish(rec.occasion_note_persian))}</blockquote>")
     title_line = f"{e(m.title_fa)} ({e(m.title_en)}، {m.year})" if m.title_fa else f"{e(m.title_en)} ({m.year})"
@@ -1476,16 +1694,14 @@ async def enrich_selected_items(session, selected_items, batch_map):
                 "full_article_excerpt": body[:ARTICLE_MAX_CHARS],
             } for s, body in chunk]
             prompt = f"""
-You are the Chief Editor of '@jazebestore'. For each item below, rewrite the Persian news copy to be COMPLETE and PRECISE
-using ONLY facts present in `rss_text` and `full_article_excerpt` (never invent facts, quotes, prices or dates).
+You are the Chief Editor of '@jazebestore'. Rewrite each item below to be COMPLETE and PRECISE using ONLY facts in `rss_text` and `full_article_excerpt`.
 Rules:
-- Avoid generalities: include every concrete name, number, date, price, platform, version, and who-said-what.
-- summary_persian: 4-6 short sentences; wrap 1-4 key facts in <b>...</b>. key_points_persian: 3-5 factual bullets.
-- background_persian: 1-2 sentences of context that helps the reader (only if supported by the text), else "".
-- Write natural, standard Persian (not word-for-word translation): correct half-spaces (نیم‌فاصله), Persian punctuation
-  (، ؛ ؟ «»), established Persian terms where common, proper nouns/game/product names kept in English.
-- Return one object per input item, same selected_id, and keep every other field consistent with the input item
-  (category_id, verification_status, confidence_score, is_breaking, series_name, hashtags, topic_fingerprint, related_game, hype_score).
+- Include concrete names, numbers, dates, prices, platforms, and who-said-what.
+- summary_persian: 3-5 short sentences; wrap 1-3 key facts in <b>...</b>. key_points_persian: 2-4 factual bullets.
+- background_persian: 1-2 context sentences if supported, else "".
+- before_after_persian: concise 'قبل: ... | اکنون: ...' comparison if the news involves a delay, price change, or spec upgrade, else "".
+- Natural Persian with proper half-spaces (نیم‌فاصله) & punctuation (، ؛ ؟ «»), English proper nouns.
+- Preserve all metadata fields (selected_id, category_id, verification_status, confidence_score, is_breaking, series_name, poll_question, poll_options, topic_hashtags, topic_fingerprint, related_game, hype_score).
 Items:
 {json.dumps(payload, ensure_ascii=False)}
 """
@@ -1498,7 +1714,7 @@ Items:
                 if not e or len((e.summary_persian or "").strip()) < 60:
                     continue
                 for field in ("headline_persian", "summary_persian", "background_persian",
-                              "image_alt_persian", "av_transcript_summary_persian"):
+                              "before_after_persian", "image_alt_persian", "av_transcript_summary_persian"):
                     val = getattr(e, field, "")
                     if val and val.strip():
                         setattr(s, field, val)
@@ -1714,7 +1930,7 @@ async def fetch_rss_sources(session: aiohttp.ClientSession):
     if new_count > 0:
         await run_semantic_clustering_and_deduplication()
 
-# ================= ۱۴. قالب غنی و دسترس‌پذیر خبر و انتشار =================
+# ================= ۱۴. قالب غنی، تجمیع‌گر هوشمند (Smart Digest) و انتشار =================
 _CAT_EMOJI = {"gaming": "🎮", "technology": "💻", "hardware": "⚡", "crypto": "🪙", "film_tv": "🍿",
               "internet_culture": "🌐", "fun_meme": "😄", "music": "🎵", "general_news": "📰"}
 _VER_ICON = {"خبر رسمی": "✅", "گزارش رسانه معتبر": "📰", "شایعه و لیک": "🕵️", "خبر تأییدنشده": "⚠️"}
@@ -1738,11 +1954,26 @@ def format_rich_news_post(sel: SelectedNewsItem, orig_item: dict, main_cat_hasht
     summary = re.sub(r"\s*\n\s*", " ", sel.summary_persian or "")
     lines.append(f"<blockquote>{sanitize_telegram_html(summary)}</blockquote>")
 
+    # بخش مقایسه قبل و بعد (Before vs After) در صورت وجود تغییر مهم
+    before_after = getattr(sel, "before_after_persian", "") or ""
+    if before_after.strip():
+        lines.append("")
+        lines.append(f"🔄 <b>مقایسه قبل و بعد:</b> {sanitize_telegram_html(before_after.strip())}")
+
     background = getattr(sel, "background_persian", "") or ""
     if background.strip():
         lines.append("")
         background = re.sub(r"\s*\n\s*", " ", background)
         lines.append(f"📌 <b>پیش‌زمینه:</b> {sanitize_telegram_html(background)}")
+
+    # اتصال هوشمند به آرشیو موضوعی کانال (Topic Hub) برای پست‌های قبلی همین بازی/موضوع
+    if sel.related_game:
+        archive_links = get_related_channel_archive_links(sel.related_game, orig_item['id'], limit=2)
+        if archive_links:
+            lines.append("")
+            lines.append(f"🗂 <b>پرونده ویژه {html.escape(sel.related_game)} در کانال:</b>")
+            for prev_h, prev_url in archive_links:
+                lines.append(f"• <a href=\"{html.escape(prev_url)}\">{sanitize_telegram_html(prev_h)}</a>")
 
     if sel.key_points_persian:
         lines.append("")
@@ -1773,6 +2004,62 @@ def format_rich_news_post(sel: SelectedNewsItem, orig_item: dict, main_cat_hasht
     lines.append(f"\n🏷 {' '.join([main_cat_hashtag] + extra[:3])}{CHANNEL_SIGNATURE}")
     return "\n".join(lines)
 
+async def publish_roundup_digest_post(
+    session: aiohttp.ClientSession,
+    roundup_items: list[tuple[SelectedNewsItem, dict]],
+    silent_mode: bool
+):
+    """
+    تجمیع‌گر هوشمند (Smart Digest Batching):
+    انتشار اخبار رده دوم در قالب یک پست یکپارچه «مرور سریع ۳۰ دقیقه اخیر» برای جلوگیری از خستگی اعلان.
+    """
+    if not roundup_items:
+        return
+    current_tehran = get_current_tehran_time()
+    lines = [
+        f"⚡ <b>مرور سریع و فشرده اخبار | بسته ساعت {to_fa_digits(current_tehran.strftime('%H:%M'))}</b>",
+        "گزیده سایر رویدادهای مهم دنیای گیمینگ، تکنولوژی و سرگرمی در نیم ساعت گذشته:",
+        ""
+    ]
+    used_tags = {"#مرور_سریع"}
+
+    for sel, orig_item in roundup_items:
+        polish_selected(sel)
+        cat_id = sel.category_id if sel.category_id in CATEGORY_HASHTAGS else orig_item.get('category', 'general_news')
+        emoji = _CAT_EMOJI.get(cat_id, "🔹")
+        used_tags.add(CATEGORY_HASHTAGS.get(cat_id, "#اخبار"))
+        headline_clean = sanitize_telegram_html(sel.headline_persian)
+        first_sentence = sanitize_telegram_html((sel.summary_persian or "").split(".")[0].strip())
+        news_url = html.escape(orig_item.get('link', STORE_BASE_URL))
+
+        lines.append(f"{emoji} <b>{headline_clean}</b>")
+        if first_sentence:
+            lines.append(f"▫️ {first_sentence}. (<a href=\"{news_url}\">منبع</a>)")
+        lines.append("")
+
+    lines.append(f"🏷 {' '.join(list(used_tags)[:5])}{CHANNEL_SIGNATURE}")
+    roundup_text = "\n".join(lines)
+
+    try:
+        msg = await send_post(session, roundup_text, silent=silent_mode)
+        for sel, orig_item in roundup_items:
+            cat_id = sel.category_id if sel.category_id in CATEGORY_HASHTAGS else orig_item.get('category', 'general_news')
+            save_published_news_details(
+                item_id=orig_item['id'],
+                fingerprint=sel.topic_fingerprint,
+                pub_cat=cat_id,
+                pub_headline=sel.headline_persian,
+                related_entity=sel.related_game,
+                ai_payload=sel.model_dump(),
+                telegram_msg_id=msg.message_id
+            )
+            if sel.related_game:
+                record_hype_event(sel.related_game, cat_id, float(sel.hype_score))
+        print(f"⚡ بسته مرور سریع با {len(roundup_items)} خبر در یک پست واحد منتشر شد.")
+    except Exception as err:
+        print(f"⚠️ خطا در انتشار بسته مرور سریع: {err}")
+        update_news_status([orig['id'] for _, orig in roundup_items], 'failed', increment_retry=True)
+
 async def process_and_publish_batch(
     session: aiohttp.ClientSession,
     breaking_only: bool = False,
@@ -1793,8 +2080,8 @@ async def process_and_publish_batch(
             SELECT id, url, category, source, raw_title, raw_text, image_url, has_video_or_audio, source_count, is_breaking_candidate
             FROM news_items
             WHERE status IN ('pending', 'failed') AND retry_count < 3
-            ORDER BY is_breaking_candidate DESC, source_count DESC, id DESC LIMIT ?
-        """, (MAX_CANDIDATES_FOR_AI,))
+            ORDER BY is_breaking_candidate DESC, source_count DESC, id DESC LIMIT 65
+        """)
 
     rows = c.fetchall()
     if not rows:
@@ -1810,7 +2097,7 @@ async def process_and_publish_batch(
     recent_topics = [r[0] for r in c.fetchall() if r[0]]
     conn.close()
 
-    current_batch = [
+    all_fetched = [
         {
             'id': r[0],
             'link': r[1],
@@ -1826,6 +2113,17 @@ async def process_and_publish_batch(
         for r in rows
     ]
 
+    # پیش‌فیلتر محلی هوشمند برای کاهش مصرف توکن و انتخاب ۲۴ کاندیدای برتر قبل از فراخوانی AI
+    cat_weights = get_category_engagement_weights()
+    for item in all_fetched:
+        item['_local_score'] = score_candidate_locally(item, cat_weights)
+    all_fetched.sort(key=lambda x: x['_local_score'], reverse=True)
+
+    current_batch = all_fetched[:MAX_CANDIDATES_FOR_AI]
+    dropped_low_score_ids = [x['id'] for x in all_fetched[MAX_CANDIDATES_FOR_AI:]]
+    if not breaking_only and dropped_low_score_ids:
+        update_news_status(dropped_low_score_ids, 'rejected')
+
     trends_24h = detect_24h_trends(top_n=5)
     candidates_for_ai = [
         {
@@ -1840,7 +2138,7 @@ async def process_and_publish_batch(
         for item in current_batch
     ]
 
-    mode_label = "BREAKING NEWS" if breaking_only else "30-MIN CYCLE"
+    mode_label = "BREAKING NEWS" if breaking_only else "30-MIN SMART DIGEST CYCLE"
     prompt = f"""
     Chief Editor for '@jazebestore' (Persian Gaming, Tech, Hardware, Crypto, Entertainment channel). Year: 2026. Mode: {mode_label}.
     24h Trends: {json.dumps(trends_24h, ensure_ascii=False)}
@@ -1848,22 +2146,24 @@ async def process_and_publish_batch(
     Candidates: {json.dumps(candidates_for_ai, ensure_ascii=False)}
 
     Rules:
-    1. Select AT MOST {max_items} unique, high-value stories (skip purely visual items with no text). Include `fun_meme` if funny candidates exist.
+    1. Select AT MOST {max_items} unique, high-value stories ordered from HIGHEST priority/hype to lowest (top 3 will become standalone posts, rest go into a quick roundup). Include `fun_meme` if funny candidates exist.
     2. `verification_status`: one of ["خبر رسمی", "گزارش رسانه معتبر", "شایعه و لیک", "خبر تأییدنشده"]. Set `confidence_score` (40-100).
     3. `series_name`: optional from ["Game of the Week", "Movie of the Week", "Tech Breakdown", "Weekly Gaming News", "Best Hardware Deals", "This Week in Gaming"], else "".
     4. Accessible Persian (WCAG):
        - `headline_persian`: clear Persian headline (no emojis/HTML).
-       - `summary_persian`: 4-6 short factual sentences in fluent Persian with proper half-spaces (نیم‌فاصله) & punctuation (، ؛ ؟ «»), keeping English proper nouns; wrap 1-4 key facts in <b>...</b>.
-       - `key_points_persian`: 3-5 factual Persian bullets; `background_persian`: 1-2 context sentences if supported, else "".
+       - `summary_persian`: 3-5 short factual sentences in fluent Persian with proper half-spaces (نیم‌فاصله) & punctuation (، ؛ ؟ «»), keeping English proper nouns; wrap 1-3 key facts in <b>...</b>.
+       - `key_points_persian`: 2-4 factual Persian bullets; `background_persian`: 1-2 context sentences if supported, else "".
+       - `before_after_persian`: if news involves a delay, price change, or spec upgrade, write 'قبل: ... | اکنون: ...', else "".
        - `image_alt_persian`: if `img` is true, 1-sentence Persian visual description for blind users.
        - `av_transcript_summary_persian`: if `av` is true, concise Persian text summary of video/audio for deaf users.
-    5. `related_game`: canonical English title (e.g. "GTA VI", "PlayStation Plus", "PS5 Pro"), else "". Prefer `av`=true when newsworthy.
+    5. Engagement Poll (for `hype_score` >= 8): provide `poll_question` and 2-3 short `poll_options` in Persian; otherwise leave empty.
+    6. `related_game`: canonical English title (e.g. "GTA VI", "PlayStation Plus", "PS5 Pro"), else "".
     """
 
     validated_result = await generate_news_with_fallback(prompt)
 
     if not validated_result:
-        print("❌ تمامی سرویس‌های AI در این نوبت با خطا مواجه شدند. وضعیت خبرها روی pending باقی ماند تا از دست نروند.")
+        print("❌ تمامی سرویس‌های AI در این نوبت با خطا مواجه شدند. وضعیت خبرها روی pending باقی ماند.")
         return
 
     selected_items = validated_result.selected_news[:max_items]
@@ -1876,13 +2176,19 @@ async def process_and_publish_batch(
     if not breaking_only and non_selected_ids:
         update_news_status(non_selected_ids, 'rejected')
 
-    selected_items = await enrich_selected_items(session, selected_items, batch_map)
+    # تفکیک خبرهای مستقل (حداکثر ۳ خبر برتر) از خبرهای بسته مرور سریع (Smart Digest Batching)
+    standalone_limit = max_items if breaking_only else MAX_STANDALONE_POSTS_PER_CYCLE
+    standalone_selections = selected_items[:standalone_limit]
+    roundup_selections = [] if breaking_only else selected_items[standalone_limit:]
+
+    # تکمیل متن کامل مقاله فقط برای خبرهای مستقل (صرفه‌جویی چشمگیر در مصرف API)
+    standalone_selections = await enrich_selected_items(session, standalone_selections, batch_map)
 
     tehran_hour = get_current_tehran_time().hour
     silent_mode = (0 <= tehran_hour < 8) and not breaking_only
     memes_posted = 0
 
-    for sel in selected_items:
+    for sel in standalone_selections:
         orig_item = batch_map.get(sel.selected_id)
         if not orig_item:
             continue
@@ -1914,7 +2220,8 @@ async def process_and_publish_batch(
                 pub_cat=cat_id,
                 pub_headline=sel.headline_persian,
                 related_entity=sel.related_game,
-                ai_payload=sel.model_dump()
+                ai_payload=sel.model_dump(),
+                telegram_msg_id=news_msg.message_id
             )
             remember_news_message(orig_item['id'], news_msg.message_id)
             if sel.related_game:
@@ -1922,6 +2229,11 @@ async def process_and_publish_batch(
 
             if video_url:
                 await send_video_reply(video_url, news_msg.message_id, silent_mode)
+
+            # ارسال خودکار نظرسنجی تعاملی تلگرام زیر اخبار داغ (hype_score >= 8)
+            if not silent_mode and sel.hype_score >= POLL_MIN_HYPE and sel.poll_question:
+                await send_interactive_poll_reply(sel, news_msg.message_id, silent_mode)
+
             if (not silent_mode and memes_posted < MEME_MAX_PER_CYCLE
                     and (sel.hype_score >= MEME_MIN_HYPE or cat_id == "fun_meme")):
                 if await post_meme_reply_for_news(session, sel, news_msg.message_id):
@@ -1932,6 +2244,11 @@ async def process_and_publish_batch(
         except Exception as send_err:
             print(f"⚠️ خطا در ارسال خبر #{orig_item['id']} به تلگرام: {send_err}")
             update_news_status([orig_item['id']], 'failed', increment_retry=True)
+
+    # انتشار باقی اخبار برگزیده در یک پست یکپارچه «مرور سریع»
+    if roundup_selections:
+        roundup_pairs = [(s, batch_map[s.selected_id]) for s in roundup_selections if s.selected_id in batch_map]
+        await publish_roundup_digest_post(session, roundup_pairs, silent_mode)
 
 # ================= ۱۵. گزارش خلاصه روزانه (Daily Digest ساعت ۰۰:۰۰ به وقت تهران) =================
 async def publish_daily_digest_if_due():
@@ -2018,7 +2335,62 @@ async def publish_daily_digest_if_due():
     except Exception as e:
         print(f"⚠️ خطا در ارسال Daily Digest: {e}")
 
-# ================= ۱۶. مدیریت دکمه لایک پست‌ها =================
+# ================= ۱۶. داشبورد سلامت ربات برای ادمین (/status) و مدیریت لایک =================
+async def admin_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """داشبورد خصوصی وضعیت سلامت ربات، سهمیه APIها و آمار تعامل دسته‌بندی‌ها (/status)"""
+    if not update.effective_user or not update.message:
+        return
+    user_id = update.effective_user.id
+    if ADMIN_USER_ID and user_id != ADMIN_USER_ID:
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM news_items WHERE status = 'published' AND published_at >= datetime('now', '-24 hours')")
+    pub_24h = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM news_items WHERE status = 'pending'")
+    pending_cnt = c.fetchone()[0]
+    c.execute("SELECT category, published_posts, total_likes FROM category_engagement ORDER BY total_likes DESC LIMIT 5")
+    cat_stats = c.fetchall()
+    conn.close()
+
+    trends = detect_24h_trends(top_n=4)
+    trend_str = " | ".join(f"{t['entity']} ({t['mentions']})" for t in trends) if trends else "هنوز ثبت نشده"
+    usd_rate = get_metadata("last_usd_rate", "ثبت نشده")
+    if usd_rate.isdigit():
+        usd_rate = f"{_fa_money(int(usd_rate))} تومان"
+
+    g_health = get_metadata("api_health_gemini", "در انتظار اولین اجرا")
+    q_health = get_metadata("api_health_groq", "در انتظار اولین اجرا")
+    o_health = get_metadata("api_health_openrouter", "در انتظار اولین اجرا")
+
+    lines = [
+        "🛠 <b>داشبورد وضعیت سلامت ربات @jazebestore</b>",
+        f"🕒 زمان تهران: {get_current_tehran_time().strftime('%Y-%m-%d %H:%M')}",
+        "",
+        f"📰 اخبار منتشرشده ۲۴ ساعت اخیر: <b>{to_fa_digits(pub_24h)} خبر</b>",
+        f"⏳ خبرهای در صف پردازش: <b>{to_fa_digits(pending_cnt)} خبر</b>",
+        f"💵 آخرین نرخ دلار ثبت‌شده: <b>{usd_rate}</b>",
+        f"🔥 ترندهای ۲۴ ساعته: <b>{html.escape(trend_str)}</b>",
+        "",
+        "<b>وضعیت سرویس‌های هوش مصنوعی:</b>",
+        f"• Gemini ({len(GEMINI_API_KEYS)} کلید): {html.escape(g_health)}",
+        f"• Groq ({len(GROQ_API_KEYS)} کلید): {html.escape(q_health)}",
+        f"• OpenRouter ({len(OPENROUTER_API_KEYS)} کلید): {html.escape(o_health)}",
+    ]
+
+    if cat_stats:
+        lines.append("")
+        lines.append("<b>نرخ تعامل دسته‌بندی‌ها (بر اساس لایک کاربران):</b>")
+        for cat, posts, likes in cat_stats:
+            cat_fa = CATEGORY_PERSIAN_NAMES.get(cat, cat)
+            lines.append(f"• {cat_fa}: {to_fa_digits(likes)} لایک در {to_fa_digits(posts)} پست")
+
+    if not ADMIN_USER_ID:
+        lines.append(f"\nℹ️ آی‌دی عددی شما: <code>{user_id}</code> (برای قفل کردن این دستور فقط روی خودتان، متغیر <code>ADMIN_USER_ID</code> را در Railway ست کنید).")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
 async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
@@ -2027,6 +2399,12 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     data = query.data or ""
     if data.startswith("like_"):
+        try:
+            item_id = int(data.split("_")[1])
+            record_category_like(item_id)
+        except Exception:
+            pass
+
         try:
             existing_rows = [list(r) for r in query.message.reply_markup.inline_keyboard]
             first_btn_text = existing_rows[0][0].text
@@ -2052,9 +2430,9 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def background_news_loop(app_bot):
     init_db()
-    print("🚀 24/7 Accessible News, Breaking Queue, Daily USD/Recs & Trend Bot is running...")
+    print("🚀 24/7 Smart Digest, Interactive Polls, Topic Hub & Trend Bot is running...")
 
-    await asyncio.sleep(15)
+    await asyncio.sleep(10)
 
     last_regular_cycle_ts = 0.0
 
@@ -2070,7 +2448,7 @@ async def background_news_loop(app_bot):
                 await fetch_rss_sources(shared_session)
 
                 if (now_ts - last_regular_cycle_ts) >= REGULAR_CYCLE_SECONDS:
-                    print(f"\n--- [چرخه ۳۰ دقیقه‌ای | {tehran_now.strftime('%Y-%m-%d %H:%M')} تهران] ---")
+                    print(f"\n--- [چرخه ۳۰ دقیقه‌ای هوشمند | {tehran_now.strftime('%Y-%m-%d %H:%M')} تهران] ---")
                     await process_and_publish_batch(
                         session=shared_session,
                         breaking_only=False,
@@ -2101,6 +2479,7 @@ def main():
         .get_updates_connect_timeout(30)
         .build()
     )
+    application.add_handler(CommandHandler("status", admin_status_command))
     application.add_handler(CallbackQueryHandler(button_click_handler))
     application.add_error_handler(error_handler)
 
@@ -2110,10 +2489,10 @@ def main():
 
     application.post_init = post_init
 
-    print("Telegram Bot application started (24/7 Unified Mode)...")
+    print("Telegram Bot application started (24/7 Smart Digest & Interactive Mode)...")
     application.run_polling(
         drop_pending_updates=True,
-        allowed_updates=["callback_query"],
+        allowed_updates=["message", "callback_query"],
         close_loop=False
     )
 
