@@ -42,6 +42,9 @@ GEMINI_API_KEYS = [
     ] if k.strip() and not k.startswith("YOUR_")
 ]
 
+CLOUDFLARE_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+CLOUDFLARE_API_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
+
 GROQ_API_KEYS = [k.strip() for k in os.environ.get("GROQ_API_KEYS", "").split(",") if k.strip()]
 OPENROUTER_API_KEYS = [k.strip() for k in os.environ.get("OPENROUTER_API_KEYS", "").split(",") if k.strip()]
 OMDB_API_KEY = os.environ.get("OMDB_API_KEY", "").strip()
@@ -52,7 +55,7 @@ STORE_BASE_URL = 'https://jazebestore.com'
 CHANNEL_SIGNATURE = "\n\n🎮 @jazebestore"
 DB_PATH = 'rss_news_history.db'
 
-# تنظیمات بهینه‌سازی‌شده مطابق طرح (کاهش مصرف سهمیه و افزایش دقت)
+# تنظیمات بهینه‌سازی‌شده (کاهش مصرف سهمیه و افزایش دقت)
 BREAKING_CHECK_INTERVAL_SECONDS = 180
 REGULAR_CYCLE_SECONDS = 1800
 MAX_NEWS_PER_CYCLE = 6
@@ -69,6 +72,7 @@ CLUSTER_SIMILARITY_THRESHOLD = 0.72
 
 # سهمیه داخلی سرویس‌های هوش مصنوعی (Token & Quota Controller)
 GEMINI_DAILY_INTERNAL_CALL_LIMIT = int(os.environ.get("GEMINI_DAILY_INTERNAL_CALL_LIMIT", "45"))
+CLOUDFLARE_DAILY_INTERNAL_CALL_LIMIT = int(os.environ.get("CLOUDFLARE_DAILY_INTERNAL_CALL_LIMIT", "40"))
 GROQ_MAX_CONCURRENT_REQUESTS = 1
 GROQ_MIN_INTERVAL_SECONDS = 60
 GROQ_MAX_INPUT_TOKENS = 4000
@@ -77,10 +81,14 @@ GROQ_DAILY_INTERNAL_CALL_LIMIT = 15
 GROQ_DAILY_INTERNAL_TOKEN_LIMIT = 100000
 OPENROUTER_DAILY_INTERNAL_CALL_LIMIT = 5
 
-# مدل‌های رایگان معتبر در نوامبر ۲۰۲۶ (حذف کامل llama-3.3-70b-versatile و text-embedding-004)
+# مدل‌های رایگان معتبر
 GEMINI_MAIN_MODEL = 'gemini-3.8-flash'
 GEMINI_LITE_MODEL = 'gemini-3.5-flash-lite'
 GEMINI_MODELS = [GEMINI_MAIN_MODEL, GEMINI_LITE_MODEL]
+CLOUDFLARE_MODELS = [
+    '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
+    '@cf/qwen/qwen2.5-72b-instruct'
+]
 GROQ_VERIFY_MODEL = 'openai/gpt-oss-120b'
 GROQ_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.8-27b']
 OPENROUTER_MODELS = ['openrouter/free']
@@ -136,7 +144,6 @@ SERIALIZED_SERIES_HEADERS = {
     "This Week in Gaming": "🚀 رویدادهای هفته: This Week in Gaming"
 }
 
-# تفکیک موضوعات مهم از افعال رویدادی برای تشخیص دقیق Breaking News
 IMPORTANT_ENTITIES_KEYWORDS = [
     "gta vi", "gta 6", "rockstar", "ps5 pro", "ps6", "playstation", "xbox",
     "nintendo switch 2", "switch 2", "steam", "valve", "nvidia", "rtx 5090", "rtx 5080",
@@ -156,7 +163,6 @@ SENSITIVE_CLAIM_KEYWORDS = [
     "rumor", "leak", "report", "قیمت", "دلار", "تاریخ انتشار", "تأخیر", "شایعه", "مشخصات"
 ]
 
-# دامنه‌های رسمی و معتبر برای محاسبه امتیاز اعتبار منبع (Source Authority)
 OFFICIAL_PUBLISHER_DOMAINS = {
     "blog.playstation.com", "news.xbox.com", "nintendo.com", "rockstargames.com",
     "nvidia.com", "amd.com", "apple.com", "openai.com", "blog.google"
@@ -301,7 +307,12 @@ os.makedirs('temp_media', exist_ok=True)
 bot: Bot | None = None
 _groq_semaphore = asyncio.Semaphore(GROQ_MAX_CONCURRENT_REQUESTS)
 _last_groq_call_ts = 0.0
-_provider_cooldown_until: dict[str, float] = {"gemini": 0.0, "groq": 0.0, "openrouter": 0.0}
+_provider_cooldown_until: dict[str, float] = {
+    "gemini": 0.0,
+    "cloudflare": 0.0,
+    "groq": 0.0,
+    "openrouter": 0.0
+}
 _disabled_keys: set[str] = set()
 
 def redact_secrets(text: str) -> str:
@@ -309,7 +320,9 @@ def redact_secrets(text: str) -> str:
     if not text:
         return ""
     out = str(text)
-    all_secrets = [TELEGRAM_BOT_TOKEN, OMDB_API_KEY] + GEMINI_API_KEYS + GROQ_API_KEYS + OPENROUTER_API_KEYS
+    all_secrets = [
+        TELEGRAM_BOT_TOKEN, OMDB_API_KEY, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN
+    ] + GEMINI_API_KEYS + GROQ_API_KEYS + OPENROUTER_API_KEYS
     for secret in all_secrets:
         if secret and len(secret) > 6:
             out = out.replace(secret, "***REDACTED***")
@@ -317,7 +330,6 @@ def redact_secrets(text: str) -> str:
     return out
 
 def sanitize_plain_url(url: str | None) -> str:
-    """پاک‌سازی آدرس از هرگونه فرمت Markdown یا کاراکترهای اضافی"""
     if not url:
         return ""
     u = str(url).strip()
@@ -327,7 +339,6 @@ def sanitize_plain_url(url: str | None) -> str:
     return u.strip("[]()<> \"'")
 
 def normalize_canonical_url(url: str | None) -> str:
-    """تولید آدرس Canonical با حذف پارامترهای تبلیغاتی و ردیابی برای جلوگیری از خبر تکراری"""
     clean = sanitize_plain_url(url)
     if not clean:
         return ""
@@ -363,7 +374,6 @@ def extract_publisher_domain(url: str | None) -> str:
         return "unknown"
 
 def validate_safe_external_url(url: str | None) -> str | None:
-    """محافظت در برابر SSRF: مسدودسازی آدرس‌های محلی، Loopback، Private IP و پروتکل‌های غیرمجاز"""
     clean = sanitize_plain_url(url)
     if not clean:
         return None
@@ -391,7 +401,6 @@ async def safe_http_get_text(
     timeout_sec: int = 12,
     require_html_or_xml: bool = False
 ) -> tuple[int, str, dict]:
-    """دریافت امن متن از وب با بررسی SSRF در ریدایرکت‌ها، کنترل Content-Type و محدودیت حجم"""
     safe_url = validate_safe_external_url(url)
     if not safe_url:
         return 0, "", {}
@@ -581,7 +590,6 @@ def init_db():
                     value TEXT
                 )''')
 
-    # شاخص‌های پیشنهادی برای بهینه‌سازی کوئری‌ها
     c.execute("CREATE INDEX IF NOT EXISTS idx_news_status_discovered ON news_items(status, discovered_at);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_news_published_at ON news_items(published_at);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_news_category ON news_items(category);")
@@ -614,7 +622,6 @@ def increment_metadata_counter(key: str, delta: int = 1):
     set_metadata(key, str(cur + delta))
 
 def recover_stale_leases():
-    """بازگرداندن خبرهایی که به دلیل ری‌استارت در وضعیت‌های میانی (processing/selected/publishing) گیر کرده‌اند"""
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("""
@@ -656,7 +663,6 @@ def update_news_status(item_ids: list[int], new_status: str, increment_retry: bo
     conn.close()
 
 def mark_outbox_sending(item_id: int) -> int | None:
-    """بررسی Idempotency قبل از ارسال به تلگرام؛ اگر قبلاً ارسال شده باشد شناسه پیام را برمی‌گرداند"""
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT status, telegram_message_id FROM publish_outbox WHERE news_item_id = ?", (item_id,))
@@ -732,7 +738,6 @@ def save_published_news_details(
     conn.close()
 
 def register_unique_user_vote(item_id: int, user_id: int) -> tuple[bool, int]:
-    """ثبت رأی یکتا به ازای هر user_id برای جلوگیری از دست‌کاری شمارنده لایک"""
     conn = get_db_connection()
     c = conn.cursor()
     try:
@@ -862,7 +867,6 @@ def persian_polish(text: str) -> str:
     return t.strip()
 
 def contains_keyword(text: str, keyword: str) -> bool:
-    """تطبیق دقیق مرز کلمات (Word-Boundary) برای جلوگیری از خطای زیررشته‌ای مانند 'ai' در 'said'"""
     if not text or not keyword:
         return False
     norm_text = to_en_digits(text.replace("ي", "ی").replace("ك", "ک").replace("\u200c", " ")).casefold()
@@ -880,7 +884,6 @@ def normalize_title_hash(title: str) -> str:
     return hashlib.blake2b(" ".join(tokens).encode("utf-8"), digest_size=12).hexdigest()
 
 def deterministic_token_hash(token: str) -> int:
-    """هش پایدار با blake2b که برخلاف hash() داخلی پایتون، بین ری‌استارت‌ها تغییر نمی‌کند"""
     digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
     return int.from_bytes(digest, byteorder="big", signed=False)
 
@@ -912,7 +915,6 @@ def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 def extract_proper_entities(text: str) -> set[str]:
-    """استخراج نام‌های خاص، شرکت‌ها و بازی‌ها برای تشخیص هم‌پوشانی رویداد"""
     found = set()
     for ent in IMPORTANT_ENTITIES_KEYWORDS:
         if contains_keyword(text, ent):
@@ -924,12 +926,6 @@ def extract_proper_entities(text: str) -> set[str]:
     return found
 
 def evaluate_breaking_candidate(title: str, text: str, pub_domain: str, independent_sources: int = 1) -> bool:
-    """
-    تشخیص دقیق خبر فوری بر اساس ۳ شرط:
-    ۱. وجود موضوع/موجودیت مهم
-    ۲. وجود فعل رویدادی (معرفی رسمی، عرضه، تأخیر، لغو)
-    ۳. منبع رسمی یا تأیید مستقل (یا رسانه درجه ۱)
-    """
     combined = f"{title} {text}"
     has_entity = any(contains_keyword(combined, ent) for ent in IMPORTANT_ENTITIES_KEYWORDS)
     has_verb = any(contains_keyword(combined, verb) for verb in BREAKING_EVENT_VERBS)
@@ -937,17 +933,7 @@ def evaluate_breaking_candidate(title: str, text: str, pub_domain: str, independ
     return bool(has_entity and has_verb and has_authority)
 
 def compute_composite_candidate_score(item: dict, cat_weights: dict[str, float]) -> float:
-    """
-    امتیازدهی ترکیبی وزنی (۰ تا ۱۰۰):
-    - اعتبار منبع: ۲۵٪
-    - اهمیت موضوع برای حوزه کانال: ۲۰٪
-    - تازگی خبر: ۲۰٪
-    - تأیید مستقل از منابع دیگر: ۲۰٪
-    - کیفیت و کامل بودن اطلاعات: ۱۰٪
-    - رسانه همراه: ۵٪
-    """
     pub_dom = item.get("publisher_domain") or extract_publisher_domain(item.get("source"))
-    # ۱. اعتبار منبع (حداکثر ۲۵ امتیاز)
     if pub_dom in OFFICIAL_PUBLISHER_DOMAINS:
         auth_score = 25.0
     elif pub_dom in TIER1_HIGH_PRIORITY_DOMAINS:
@@ -955,14 +941,12 @@ def compute_composite_candidate_score(item: dict, cat_weights: dict[str, float])
     else:
         auth_score = 12.0
 
-    # ۲. اهمیت موضوع (حداکثر ۲۰ امتیاز)
     combined_text = f"{item.get('title', '')} {item.get('text', '')}"
     kw_hits = sum(1 for kw in IMPORTANT_ENTITIES_KEYWORDS if contains_keyword(combined_text, kw))
     verb_hits = sum(1 for vb in BREAKING_EVENT_VERBS if contains_keyword(combined_text, vb))
     cat_bonus = cat_weights.get(item.get("category", "general_news"), 0.5) * 2.0
     relevance_score = min(20.0, (kw_hits * 5.0) + (verb_hits * 4.0) + cat_bonus)
 
-    # ۳. تازگی خبر بر اساس source_published_at (حداکثر ۲۰ امتیاز)
     freshness_score = 14.0
     pub_ts_str = item.get("source_published_at")
     if pub_ts_str:
@@ -980,7 +964,6 @@ def compute_composite_candidate_score(item: dict, cat_weights: dict[str, float])
         except Exception:
             pass
 
-    # ۴. تأیید مستقل از ناشران دیگر (حداکثر ۲۰ امتیاز)
     ind_sources = max(1, int(item.get("source_count", 1)))
     if ind_sources >= 3:
         corroboration_score = 20.0
@@ -989,12 +972,10 @@ def compute_composite_candidate_score(item: dict, cat_weights: dict[str, float])
     else:
         corroboration_score = 5.0
 
-    # ۵. کیفیت و کامل بودن متن (حداکثر ۱۰ امتیاز)
     text_len = len(item.get("text", ""))
     has_numbers = bool(re.search(r'\d+', combined_text))
     completeness_score = min(10.0, (min(text_len, 320) / 45.0) + (3.0 if has_numbers else 0.0))
 
-    # ۶. رسانه همراه (حداکثر ۵ امتیاز)
     media_score = 0.0
     if item.get("image_url"):
         media_score += 2.5
@@ -1003,22 +984,20 @@ def compute_composite_candidate_score(item: dict, cat_weights: dict[str, float])
 
     return round(auth_score + relevance_score + freshness_score + corroboration_score + completeness_score + media_score, 2)
 
-def compute_evidence_based_verification(pub_domain: str, independent_sources: int, groq_verified: bool | None) -> tuple[str, int]:
-    """تعیین وضعیت اعتبار خبر و درجه اطمینان در پایتون بر اساس شواهد واقعی (نه حدس مدل)"""
-    if groq_verified is False:
+def compute_evidence_based_verification(pub_domain: str, independent_sources: int, second_model_verified: bool | None) -> tuple[str, int]:
+    if second_model_verified is False:
         return "شایعه یا تأییدنشده", 45
     if pub_domain in OFFICIAL_PUBLISHER_DOMAINS:
-        conf = 96 if groq_verified else 92
+        conf = 96 if second_model_verified else 92
         return "خبر رسمی", conf
     if independent_sources >= 2:
         conf = min(94, 80 + (independent_sources * 4))
         return "گزارش تأییدشده از چند منبع", conf
     if pub_domain in TIER1_HIGH_PRIORITY_DOMAINS:
-        return "گزارش یک رسانه معتبر", (84 if groq_verified else 78)
+        return "گزارش یک رسانه معتبر", (84 if second_model_verified else 78)
     return "خبر تأییدنشده", 60
 
 async def run_semantic_clustering_and_deduplication():
-    """پردازش تمام خبرهای کشف‌شده در دسته‌های متوالی، انتخاب بهترین نماینده خوشه و ثبت ناشران مستقل"""
     while True:
         conn = get_db_connection()
         c = conn.cursor()
@@ -1234,10 +1213,10 @@ def clean_raw_text(text: str) -> str:
 def get_feed_tier_and_interval(category: str, url: str) -> tuple[int, int]:
     dom = extract_publisher_domain(url)
     if dom in OFFICIAL_PUBLISHER_DOMAINS or dom in TIER1_HIGH_PRIORITY_DOMAINS:
-        return 1, 180      # سطح ۱: هر ۳ دقیقه
+        return 1, 180
     if category in TIER3_LOW_URGENCY_CATEGORIES:
-        return 3, 3600     # سطح ۳: هر ۶۰ دقیقه
-    return 2, 900          # سطح ۲: هر ۱۵ دقیقه
+        return 3, 3600
+    return 2, 900
 
 def parse_entry_published_iso(entry) -> str | None:
     for attr in ("published", "updated", "created"):
@@ -1333,7 +1312,6 @@ async def fetch_single_feed(
             if pub_iso:
                 try:
                     pub_dt = datetime.fromisoformat(pub_iso)
-                    # رد کردن خبرهای قدیمی‌تر از ۴۸ ساعت که تازه وارد فید شده‌اند
                     if (now_utc - pub_dt).total_seconds() > 48 * 3600:
                         continue
                 except Exception:
@@ -1484,8 +1462,6 @@ async def fetch_rss_sources(session: aiohttp.ClientSession):
 
     conn.commit()
     conn.close()
-
-    # اجرای خوشه‌بندی برای تمام خبرهای کشف‌شده در صف
     await run_semantic_clustering_and_deduplication()
 
 # ================= ۸. جمع‌آوری شواهد مقاله پیش از فراخوانی هوش مصنوعی =================
@@ -1496,7 +1472,6 @@ def _youtube_watch_url(url: str) -> str:
     return f"https://www.youtube.com/watch?v={m.group(1)}" if m else url
 
 def extract_evidence_from_text(text: str) -> tuple[list[str], list[str]]:
-    """استخراج نقل‌قول‌های مستقیم و اعداد/تاریخ‌ها از متن منبع برای ثبت در Fact Evidence Ledger"""
     if not text:
         return [], []
     quotes = [q.strip() for q in re.findall(r'"([^"]{20,180})"', text)[:4]]
@@ -1504,7 +1479,6 @@ def extract_evidence_from_text(text: str) -> tuple[list[str], list[str]]:
     return quotes, numbers
 
 async def fetch_article_evidence_for_candidates(session: aiohttp.ClientSession, candidates: list[dict]):
-    """دریافت متن کامل مقاله برای ۶ کاندیدای برتر قبل از ارسال به مدل AI و ثبت در جدول شواهد"""
     sem = asyncio.Semaphore(4)
 
     async def _fetch_one(cand: dict):
@@ -1548,9 +1522,7 @@ async def fetch_article_evidence_for_candidates(session: aiohttp.ClientSession, 
         quotes, nums = extract_evidence_from_text(combined_ev)
         cand["extracted_quotes"] = quotes
         cand["extracted_numbers"] = nums
-        c.execute("""
-            UPDATE news_items SET full_article_text = ?, video_url = ? WHERE id = ?
-        """, (body, video, cand["id"]))
+        c.execute("UPDATE news_items SET full_article_text = ?, video_url = ? WHERE id = ?", (body, video, cand["id"]))
         c.execute("""
             INSERT INTO fact_evidence_ledger (news_item_id, publisher_domain, source_url, extracted_quotes, extracted_numbers)
             VALUES (?, ?, ?, ?, ?)
@@ -1564,7 +1536,7 @@ async def fetch_article_evidence_for_candidates(session: aiohttp.ClientSession, 
     conn.commit()
     conn.close()
 
-# ================= ۹. ساختارهای داده، کنترلر سهمیه و موتور هوش مصنوعی =================
+# ================= ۹. ساختارهای داده، کنترلر سهمیه و موتور هوش مصنوعی (با Cloudflare) =================
 class MultiPlatformPack(BaseModel):
     instagram_carousel_slides: list[str] = Field(default_factory=list, description="3 to 5 concise Persian slides for Instagram Carousel")
     short_video_script_persian: str = Field(default="", description="25-second punchy Persian script (Hook + Body + CTA) for YouTube Shorts / TikTok / Reels")
@@ -1591,7 +1563,6 @@ class SelectedNewsItem(BaseModel):
 class BatchProcessResult(BaseModel):
     selected_news: list[SelectedNewsItem]
 
-# اسکیمای سخت‌گیرانه (strict: true) برای راستی‌آزمایی مستقل با Groq GPT-OSS 120B
 GROQ_VERIFICATION_STRICT_SCHEMA = {
     "name": "claim_verification_result",
     "strict": True,
@@ -1609,7 +1580,6 @@ GROQ_VERIFICATION_STRICT_SCHEMA = {
 }
 
 def get_today_ai_usage(provider: str) -> tuple[int, int]:
-    """بررسی تعداد درخواست‌ها و مجموع توکن‌های مصرف‌شده امروز برای کنترل سهمیه داخلی"""
     today_str = get_current_tehran_time().strftime("%Y-%m-%d")
     conn = get_db_connection()
     c = conn.cursor()
@@ -1634,6 +1604,13 @@ def can_use_provider(provider: str) -> tuple[bool, str]:
             return False, "بدون کلید"
         if calls >= GEMINI_DAILY_INTERNAL_CALL_LIMIT:
             return False, f"سقف روزانه داخلی ({GEMINI_DAILY_INTERNAL_CALL_LIMIT} درخواست) پر شده"
+    elif provider == "cloudflare":
+        if not (CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN):
+            return False, "بدون کلید"
+        if CLOUDFLARE_API_TOKEN in _disabled_keys:
+            return False, "توکن غیرفعال شده"
+        if calls >= CLOUDFLARE_DAILY_INTERNAL_CALL_LIMIT:
+            return False, f"سقف روزانه داخلی Cloudflare ({CLOUDFLARE_DAILY_INTERNAL_CALL_LIMIT} درخواست) پر شده"
     elif provider == "groq":
         if not GROQ_API_KEYS:
             return False, "بدون کلید"
@@ -1673,10 +1650,10 @@ def log_ai_request_usage(
     conn.close()
     ts = get_current_tehran_time().strftime("%H:%M")
     if status == "success":
-        set_metadata(f"api_health_{provider}", f"✅ سالم ({model} | {ts})")
+        set_metadata(f"api_health_{provider}", f"✅ سالم ({model.split('/')[-1]} | {ts})")
     else:
         set_metadata(f"api_health_{provider}", f"⚠️ {redact_secrets(error_type)[:35]} ({ts})")
-        set_metadata("last_api_error", f"{provider}/{model}: {redact_secrets(error_type)[:60]} ({ts})")
+        set_metadata("last_api_error", f"{provider}/{model.split('/')[-1]}: {redact_secrets(error_type)[:60]} ({ts})")
 
 def _extract_json_from_llm_content(raw_content: str | None) -> dict:
     if not raw_content or not isinstance(raw_content, str):
@@ -1699,11 +1676,6 @@ def _build_http_client() -> httpx.AsyncClient:
     )
 
 async def call_gemini_editorial(prompt: str, schema_cls, model_prefer: str = GEMINI_MAIN_MODEL, batch_id: str = ""):
-    """
-    فراخوانی هوشمند Gemini:
-    - در صورت خطای 429 (محدودیت سهمیه پروژه)، کلید عوض نمی‌کند بلکه Cooldown تنظیم می‌کند.
-    - برای خطای 5xx یا Timeout حداکثر ۱ بار Retry می‌کند.
-    """
     ok, reason = can_use_provider("gemini")
     if not ok:
         print(f"ℹ️ عبور از Gemini: {reason}")
@@ -1748,7 +1720,6 @@ async def call_gemini_editorial(prompt: str, schema_cls, model_prefer: str = GEM
                 err_str = redact_secrets(str(e))
                 log_ai_request_usage("gemini", model_name, 0, 0, "error", err_str, retry_cnt=retry, elapsed_ms=elapsed_ms, batch_id=batch_id)
                 if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                    # سهمیه در سطح پروژه است؛ توقف بدون چرخش کلید
                     _provider_cooldown_until["gemini"] = time.time() + 900
                     print("⚠️ سهمیه Gemini به سقف رسیده است (Cooldown به مدت ۱۵ دقیقه).")
                     return None
@@ -1763,8 +1734,63 @@ async def call_gemini_editorial(prompt: str, schema_cls, model_prefer: str = GEM
                     break
     return None
 
+async def call_cloudflare_workers_ai(prompt: str, schema_cls, batch_id: str = ""):
+    """فراخوانی سرویس Cloudflare Workers AI از طریق آدرس استاندارد OpenAI-Compatible"""
+    ok, reason = can_use_provider("cloudflare")
+    if not ok:
+        if reason != "بدون کلید":
+            print(f"ℹ️ عبور از Cloudflare: {reason}")
+        return None
+
+    cf_base_url = f"[https://api.cloudflare.com/client/v4/accounts/](https://api.cloudflare.com/client/v4/accounts/){CLOUDFLARE_ACCOUNT_ID}/ai/v1"
+    schema_json = json.dumps(schema_cls.model_json_schema(), ensure_ascii=False)
+    sys_instruction = (
+        "You are a Chief Editor JSON API. Respond ONLY with one valid JSON object (no markdown fences, no commentary) "
+        f"matching this JSON schema:\n{schema_json}"
+    )
+
+    async with _build_http_client() as http_client:
+        cf_client = AsyncOpenAI(
+            api_key=CLOUDFLARE_API_TOKEN,
+            base_url=cf_base_url,
+            http_client=http_client,
+            max_retries=0
+        )
+        for model_name in CLOUDFLARE_MODELS:
+            t0 = time.monotonic()
+            try:
+                comp = await cf_client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": sys_instruction},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.2,
+                    max_tokens=2000
+                )
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                in_t = int(getattr(comp.usage, "prompt_tokens", 0) or 0) if comp.usage else 0
+                out_t = int(getattr(comp.usage, "completion_tokens", 0) or 0) if comp.usage else 0
+                content = comp.choices[0].message.content if comp.choices else None
+                raw_dict = _extract_json_from_llm_content(content)
+                validated = schema_cls.model_validate(raw_dict)
+                log_ai_request_usage("cloudflare", model_name, in_t, out_t, "success", elapsed_ms=elapsed_ms, batch_id=batch_id)
+                print(f"✅ موفقیت با Cloudflare Workers AI ({model_name.split('/')[-1]})")
+                return validated
+            except Exception as e:
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                err_str = redact_secrets(str(e))
+                log_ai_request_usage("cloudflare", model_name, 0, 0, "error", err_str, elapsed_ms=elapsed_ms, batch_id=batch_id)
+                if "429" in err_str:
+                    _provider_cooldown_until["cloudflare"] = time.time() + 900
+                    return None
+                if "401" in err_str or "403" in err_str or "Authentication" in err_str:
+                    _disabled_keys.add(CLOUDFLARE_API_TOKEN)
+                    return None
+                continue
+    return None
+
 async def call_groq_editorial_or_verify(prompt: str, schema_cls=None, strict_schema: dict | None = None, batch_id: str = ""):
-    """فراخوانی کنترل‌شده Groq با رعایت فاصله زمانی ۶۰ ثانیه، سقف توکن و پشتیبانی از Structured Output سخت‌گیرانه"""
     global _last_groq_call_ts
     ok, reason = can_use_provider("groq")
     if not ok:
@@ -1831,7 +1857,6 @@ async def call_groq_editorial_or_verify(prompt: str, schema_cls=None, strict_sch
     return None
 
 async def call_openrouter_emergency(prompt: str, schema_cls, batch_id: str = ""):
-    """مسیر اضطراری OpenRouter: فقط ۱ تلاش بدون حلقه چندمدلی تا سقف ۵۰ درخواست روزانه نسوزد"""
     ok, reason = can_use_provider("openrouter")
     if not ok:
         return None
@@ -1876,8 +1901,11 @@ async def call_openrouter_emergency(prompt: str, schema_cls, batch_id: str = "")
             return None
 
 async def generate_editorial_batch(prompt: str, batch_id: str = "") -> BatchProcessResult | None:
-    """ترتیب پیشنهادی طرح: ۱. Gemini 3.8 Flash -> ۲. Gemini Flash-Lite -> ۳. Groq -> ۴. OpenRouter اضطراری"""
+    """ترتیب پیشنهادی: ۱. Gemini 3.8 Flash -> ۲. Cloudflare Workers AI -> ۳. Groq -> ۴. OpenRouter اضطراری"""
     res = await call_gemini_editorial(prompt, BatchProcessResult, model_prefer=GEMINI_MAIN_MODEL, batch_id=batch_id)
+    if res and res.selected_news:
+        return res
+    res = await call_cloudflare_workers_ai(prompt, BatchProcessResult, batch_id=batch_id)
     if res and res.selected_news:
         return res
     res = await call_groq_editorial_or_verify(prompt, schema_cls=BatchProcessResult, batch_id=batch_id)
@@ -1889,10 +1917,6 @@ async def generate_editorial_batch(prompt: str, batch_id: str = "") -> BatchProc
     return None
 
 async def verify_sensitive_story_with_groq(sel: SelectedNewsItem, orig_item: dict, batch_id: str = "") -> tuple[bool | None, str]:
-    """
-    مرحله ۶ معماری: بررسی مستقل موارد حساس (قیمت، تاریخ عرضه، تأخیر، مشخصات یا خبر فوری)
-    توسط Groq GPT-OSS 120B با Structured Output سخت‌گیرانه (strict: true).
-    """
     combined_src = f"{orig_item.get('title', '')} {orig_item.get('text', '')} {orig_item.get('full_article_excerpt', '')}"
     is_sensitive = sel.is_breaking or any(contains_keyword(combined_src, kw) for kw in SENSITIVE_CLAIM_KEYWORDS)
     if not is_sensitive:
@@ -1945,8 +1969,10 @@ Persian Draft:
     return (is_sup and not has_contra), notes
 
 async def ask_lightweight_ai_json(prompt: str, model_cls, temperature: float = 0.4):
-    """استفاده از مدل سبک Gemini Flash-Lite برای وظایف فرعی (فرهنگ/فیلم/میم)"""
     res = await call_gemini_editorial(prompt, model_cls, model_prefer=GEMINI_LITE_MODEL, batch_id="aux")
+    if res:
+        return res
+    res = await call_cloudflare_workers_ai(prompt, model_cls, batch_id="aux")
     if res:
         return res
     return await call_groq_editorial_or_verify(prompt, schema_cls=model_cls, batch_id="aux")
@@ -2520,7 +2546,6 @@ def format_rich_news_post(
     lines.append(f"{_CAT_EMOJI.get(sel.category_id, '📰')} <b>{sanitize_telegram_html(sel.headline_persian)}</b>")
 
     cat_fa = CATEGORY_PERSIAN_NAMES.get(sel.category_id, "اخبار")
-    # مقدار پیش‌فرض ایمن همیشه «خبر تأییدنشده» است
     ver = verification_label if verification_label in _VER_ICON else "خبر تأییدنشده"
     src_cnt = max(1, int(orig_item.get("source_count", 1)))
     pub_dom = html.escape(orig_item.get("publisher_domain", "منبع خبری"))
@@ -2569,7 +2594,6 @@ def format_rich_news_post(
     return "\n".join(lines)
 
 def format_multiplatform_fact_pack(item_id: int, sel: SelectedNewsItem, orig_item: dict, ver_label: str) -> str:
-    """تولید خروجی آماده انتشار دستی برای Instagram Carousel/Reels و YouTube Shorts / TikTok"""
     mp = sel.multiplatform or MultiPlatformPack()
     e = html.escape
     lines = [
@@ -2672,7 +2696,6 @@ async def process_and_publish_batch(
         """)
     rows = c.fetchall()
 
-    # اگر هیچ کاندیدایی وجود ندارد، هیچ درخواستی به AI ارسال نشود
     if not rows:
         conn.close()
         increment_metadata_counter("skipped_ai_calls_no_news", 1)
@@ -2705,7 +2728,6 @@ async def process_and_publish_batch(
         for r in rows
     ]
 
-    # مرحله ۱: انتخاب محلی حداکثر ۶ کاندیدای برتر با امتیاز ترکیبی وزنی
     cat_weights = get_category_engagement_weights()
     for item in all_fetched:
         item['_composite_score'] = compute_composite_candidate_score(item, cat_weights)
@@ -2719,7 +2741,6 @@ async def process_and_publish_batch(
     if not breaking_only and dropped_ids:
         update_news_status(dropped_ids, 'rejected')
 
-    # مرحله ۲: جمع‌آوری شواهد و مقاله کامل قبل از فراخوانی AI
     await fetch_article_evidence_for_candidates(session, current_batch)
 
     candidates_for_ai = [
@@ -2757,7 +2778,6 @@ Strict Editorial Rules:
 6. For stories with `hype_score` >= 8, include `poll_question` and 2-3 short `poll_options`.
 """
 
-    # مرحله ۳: یک فراخوانی اصلی AI
     validated_result = await generate_editorial_batch(prompt, batch_id=batch_id)
     if not validated_result or not validated_result.selected_news:
         update_news_status([x['id'] for x in current_batch], 'pending')
@@ -2786,7 +2806,6 @@ Strict Editorial Rules:
         if not orig_item:
             continue
 
-        # بررسی Idempotency در Outbox
         already_sent_msg_id = mark_outbox_sending(orig_item['id'])
         if already_sent_msg_id:
             update_news_status([orig_item['id']], 'published')
@@ -2794,10 +2813,7 @@ Strict Editorial Rules:
 
         update_news_status([orig_item['id']], 'publishing')
 
-        # مرحله ۴: بررسی مستقل موارد حساس با Groq GPT-OSS 120B
         groq_ok, _ = await verify_sensitive_story_with_groq(sel, orig_item, batch_id=batch_id)
-
-        # مرحله ۵: محاسبه وضعیت اعتبار و درجه اطمینان در پایتون بر اساس شواهد
         ver_label, comp_conf = compute_evidence_based_verification(
             orig_item["publisher_domain"], orig_item["source_count"], groq_ok
         )
@@ -2920,7 +2936,6 @@ async def publish_daily_digest_if_due():
 
 # ================= ۱۵. داشبورد کامل ادمین (/status، /pack، /correct) و واکنش‌ها =================
 async def admin_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """دسترسی ادمین به صورت Fail-Closed: اگر ADMIN_USER_ID تنظیم نشده باشد، برای هیچ‌کس باز نمی‌شود"""
     if not update.effective_user or not update.message:
         return
     user_id = update.effective_user.id
@@ -2949,11 +2964,12 @@ async def admin_status_command(update: Update, context: ContextTypes.DEFAULT_TYP
     conn.close()
 
     g_calls, g_in, g_out, g_tot, g_ret = usage_rows.get("gemini", (0, 0, 0, 0, 0))
+    cf_calls, cf_in, cf_out, cf_tot, cf_ret = usage_rows.get("cloudflare", (0, 0, 0, 0, 0))
     q_calls, q_in, q_out, q_tot, q_ret = usage_rows.get("groq", (0, 0, 0, 0, 0))
     o_calls, o_in, o_out, o_tot, o_ret = usage_rows.get("openrouter", (0, 0, 0, 0, 0))
 
-    total_tokens_today = g_tot + q_tot + o_tot
-    total_retries_today = g_ret + q_ret + o_ret
+    total_tokens_today = g_tot + cf_tot + q_tot + o_tot
+    total_retries_today = g_ret + cf_ret + q_ret + o_ret
     news_per_1k = round((pub_24h / (total_tokens_today / 1000.0)), 2) if total_tokens_today > 0 else pub_24h
     skipped_calls = int(get_metadata("skipped_ai_calls_no_news", "0") or 0)
     last_err = get_metadata("last_api_error", "بدون خطا")
@@ -2969,7 +2985,8 @@ async def admin_status_command(update: Update, context: ContextTypes.DEFAULT_TYP
         f"📡 فیدهای دارای خطای متوالی (Backoff): <b>{to_fa_digits(failing_feeds)} فید</b>",
         "",
         "📊 <b>مصرف و سهمیه داخلی امروز:</b>",
-        f"• <b>Gemini:</b> {to_fa_digits(g_calls)}/{to_fa_digits(GEMINI_DAILY_INTERNAL_CALL_LIMIT)} درخواست | ورودی: {to_fa_digits(g_in)} | خروجی: {to_fa_digits(g_out)}",
+        f"• <b>Gemini:</b> {to_fa_digits(g_calls)}/{to_fa_digits(GEMINI_DAILY_INTERNAL_CALL_LIMIT)} درخواست | توکن: {to_fa_digits(g_tot)}",
+        f"• <b>Cloudflare AI:</b> {to_fa_digits(cf_calls)}/{to_fa_digits(CLOUDFLARE_DAILY_INTERNAL_CALL_LIMIT)} درخواست | توکن: {to_fa_digits(cf_tot)}",
         f"• <b>Groq:</b> {to_fa_digits(q_calls)}/{to_fa_digits(GROQ_DAILY_INTERNAL_CALL_LIMIT)} درخواست | توکن: {to_fa_digits(q_tot)}/{to_fa_digits(GROQ_DAILY_INTERNAL_TOKEN_LIMIT)}",
         f"• <b>OpenRouter:</b> {to_fa_digits(o_calls)}/{to_fa_digits(OPENROUTER_DAILY_INTERNAL_CALL_LIMIT)} درخواست | توکن: {to_fa_digits(o_tot)}",
         f"• <b>مجموع Retry امروز:</b> {to_fa_digits(total_retries_today)}",
@@ -2982,7 +2999,6 @@ async def admin_status_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 async def admin_pack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """دریافت بسته محتوای چندپلتفرمی (Instagram Carousel + Shorts/TikTok) برای خبر منتشرشده"""
     if not update.effective_user or not update.message:
         return
     if not ADMIN_USER_ID or update.effective_user.id != ADMIN_USER_ID:
@@ -3014,7 +3030,6 @@ async def admin_pack_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
 
 async def admin_correct_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ثبت اصلاحیه رسمی برای یک خبر منتشرشده در جدول correction_logs و ارسال ریپلای اصلاحیه در کانال"""
     if not update.effective_user or not update.message:
         return
     if not ADMIN_USER_ID or update.effective_user.id != ADMIN_USER_ID:
@@ -3078,7 +3093,6 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             pass
 
 async def message_reaction_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ثبت واکنش‌های واقعی پیام تلگرام (message_reaction_count) برای سنجش دقیق تعامل"""
     mrc = getattr(update, "message_reaction_count", None)
     if not mrc:
         return
@@ -3108,11 +3122,10 @@ async def background_news_loop(app: Application):
     if not ADMIN_USER_ID:
         print("⚠️ هشدار امنیتی: متغیر ADMIN_USER_ID تنظیم نشده است؛ دستورات ادمین (/status) به صورت پیش‌فرض قفل هستند.")
 
-    print("🚀 24/7 Evidence-Driven Editorial Engine is running...")
+    print("🚀 24/7 Evidence-Driven Editorial Engine (with Cloudflare Workers AI) is running...")
     await asyncio.sleep(8)
 
     last_regular_cycle_ts = 0.0
-    # استفاده از یک ClientSession مشترک با اعتبارسنجی کامل گواهی TLS (ssl=True پیش‌فرض)
     connector = aiohttp.TCPConnector(limit=25)
     async with aiohttp.ClientSession(connector=connector) as shared_session:
         while True:
@@ -3172,7 +3185,7 @@ def main():
 
     application.post_init = post_init
 
-    print("Telegram Bot application started (Evidence-Driven Mode)...")
+    print("Telegram Bot application started (Evidence-Driven + Cloudflare AI Mode)...")
     application.run_polling(
         drop_pending_updates=False,
         allowed_updates=["message", "callback_query", "message_reaction", "message_reaction_count"],
