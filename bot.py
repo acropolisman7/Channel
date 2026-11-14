@@ -30,7 +30,18 @@ try:
 except ImportError:
     ReplyParameters = None
 
-# ================= ۱. تنظیمات اصلی و کلیدهای API =================
+# ================= ۱. تابع محافظ لینک‌ها در برابر فرمت Markdown =================
+def sanitize_plain_url(url: str) -> str:
+    """تبدیل خودکار لینک‌های فرمت Markdown به URL خالص"""
+    if not url:
+        return ""
+    u = str(url).strip()
+    md_match = re.match(r'^\[[^\]]*\]\((https?://[^)]+)\)$', u)
+    if md_match:
+        u = md_match.group(1).strip()
+    return u.strip("[]() ")
+
+# ================= ۲. تنظیمات اصلی و کلیدهای API =================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN").strip()
 
 GEMINI_API_KEYS = [
@@ -46,9 +57,15 @@ OPENROUTER_API_KEYS = [k.strip() for k in os.environ.get("OPENROUTER_API_KEYS", 
 OMDB_API_KEY = os.environ.get("OMDB_API_KEY", "").strip()
 
 TARGET_CHANNEL = '@jazebestore'
-STORE_BASE_URL = 'https://jazebestore.com'
+STORE_BASE_URL = sanitize_plain_url('https://jazebestore.com')
 CHANNEL_SIGNATURE = "\n\n🎮 @jazebestore"
 DB_PATH = 'rss_news_history.db'
+
+GROQ_BASE_URL = sanitize_plain_url("https://api.groq.com/openai/v1")
+OPENROUTER_BASE_URL = sanitize_plain_url("https://openrouter.ai/api/v1")
+GANJOOR_API_BASE = sanitize_plain_url("https://api.ganjoor.net/api/ganjoor")
+GANJOOR_SAADI_FALLBACK_URL = sanitize_plain_url("https://ganjoor.net/saadi/")
+OMDB_API_BASE = sanitize_plain_url("https://www.omdbapi.com/")
 
 # تنظیمات زمانی و بهینه‌سازی مصرف توکن
 BREAKING_CHECK_INTERVAL_SECONDS = 300   # بررسی اخبار فوری هر ۵ دقیقه
@@ -122,7 +139,7 @@ HIGH_PRIORITY_KEYWORDS = [
     "ethereum", "trailer", "release", "update", "review", "sony", "microsoft"
 ]
 
-CATEGORIZED_RSS_SOURCES = {
+_RAW_RSS_SOURCES = {
     "gaming": [
         "https://www.ign.com/rss/v2/articles/feed",
         "https://www.gamespot.com/feeds/mashup/",
@@ -180,22 +197,17 @@ CATEGORIZED_RSS_SOURCES = {
     ]
 }
 
-# ================= ۲. راه‌اندازی دیتابیس و مدیریت سهمیه =================
+CATEGORIZED_RSS_SOURCES = {
+    cat: [sanitize_plain_url(u) for u in urls if sanitize_plain_url(u)]
+    for cat, urls in _RAW_RSS_SOURCES.items()
+}
+
+# ================= ۳. راه‌اندازی دیتابیس و مدیریت سهمیه =================
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 os.makedirs('temp_media', exist_ok=True)
 provider_rotation_index = 0
 _extra_ai_rot = 0
 _provider_cooldown_until = {"gemini": 0.0, "groq": 0.0, "openrouter": 0.0}
-
-def sanitize_plain_url(url: str) -> str:
-    """تبدیل لینک‌های احتمالی فرمت Markdown به URL خالص"""
-    if not url:
-        return ""
-    u = url.strip()
-    md_match = re.match(r'^\[[^\]]+\]\((https?://[^)]+)\)$', u)
-    if md_match:
-        u = md_match.group(1).strip()
-    return u.strip("[]() ")
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -296,7 +308,7 @@ def save_published_news_details(item_id: int, fingerprint: str, pub_cat: str, pu
     conn.commit()
     conn.close()
 
-# ================= ۳. زبان فارسی، تاریخ شمسی و ویرایش نگارشی =================
+# ================= ۴. زبان فارسی، تاریخ شمسی و ویرایش نگارشی =================
 _FA_DIGITS = "۰۱۲۳۴۵۶۷۸۹"
 _PERSIAN = "\u0600-\u06FF"
 JALALI_MONTHS = ["فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور",
@@ -375,7 +387,7 @@ def polish_selected(sel) -> None:
     if getattr(sel, "poll_options_persian", None):
         sel.poll_options_persian = [persian_polish(o) for o in sel.poll_options_persian]
 
-# ================= ۴. موتور Embedding پایدار و خوشه‌بندی =================
+# ================= ۵. موتور Embedding پایدار و خوشه‌بندی =================
 def _deterministic_token_hash(token: str) -> int:
     digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
     return int.from_bytes(digest, "big")
@@ -497,7 +509,7 @@ async def run_semantic_clustering_and_deduplication():
         conn.commit()
     conn.close()
 
-# ================= ۵. پیش‌فیلتر محلی کاندیداها =================
+# ================= ۶. پیش‌فیلتر محلی کاندیداها =================
 def score_candidate_locally(item: dict) -> float:
     score = float(item.get('source_count', 1)) * 3.0
     if item.get('is_breaking_candidate'):
@@ -510,7 +522,7 @@ def score_candidate_locally(item: dict) -> float:
             score += 1.2
     return score
 
-# ================= ۶. پاک‌سازی متن، HTML و ارسال یکپارچه =================
+# ================= ۷. پاک‌سازی متن، HTML و ارسال یکپارچه =================
 def clean_raw_text(text: str) -> str:
     if not text:
         return ""
@@ -561,16 +573,16 @@ def extract_rss_media_info(entry) -> tuple[str | None, bool]:
     if 'media_content' in entry and len(entry.media_content) > 0:
         for mc in entry.media_content:
             m_type = str(mc.get('type', '')).lower()
-            m_url = mc.get('url', '')
+            m_url = sanitize_plain_url(mc.get('url', ''))
             if 'video' in m_type or 'audio' in m_type or 'youtube.com' in m_url:
                 has_av = True
             elif not img_url and m_url:
                 img_url = m_url
 
     if not img_url and 'media_thumbnail' in entry and len(entry.media_thumbnail) > 0:
-        img_url = entry.media_thumbnail[0].get('url')
+        img_url = sanitize_plain_url(entry.media_thumbnail[0].get('url', ''))
 
-    link_str = getattr(entry, 'link', '') or ''
+    link_str = sanitize_plain_url(getattr(entry, 'link', '') or '')
     if 'youtube.com' in link_str or 'youtu.be' in link_str or 'twitch.tv' in link_str:
         has_av = True
 
@@ -583,7 +595,7 @@ def extract_rss_media_info(entry) -> tuple[str | None, bool]:
     if not img_url:
         img_tag = soup.find('img')
         if img_tag and img_tag.get('src'):
-            img_url = img_tag['src']
+            img_url = sanitize_plain_url(img_tag['src'])
 
     return img_url, has_av
 
@@ -707,7 +719,7 @@ async def send_post(session, text, image_url=None, reply_markup=None, silent=Fal
             except OSError:
                 pass
 
-# ================= ۷. پین کردن تا ۰۰:۰۰ =================
+# ================= ۸. پین کردن تا ۰۰:۰۰ =================
 def _pins_load() -> list:
     try:
         return json.loads(get_metadata("pinned_posts", "[]"))
@@ -742,7 +754,7 @@ async def unpin_expired_pins(session=None):
             remaining.append(pin)
     set_metadata("pinned_posts", json.dumps(remaining))
 
-# ================= ۸. Schema فشرده و بهینه =================
+# ================= ۹. Schema فشرده و بهینه =================
 VerificationStatusType = Literal["تأیید رسمی", "گزارش رسانه‌ای", "پیش‌بینی تحلیلگران"]
 
 class SelectedNewsItem(BaseModel):
@@ -765,7 +777,7 @@ class SelectedNewsItem(BaseModel):
 class BatchProcessResult(BaseModel):
     selected_news: list[SelectedNewsItem]
 
-# ================= ۹. موتور AI با مدیریت هوشمند Cooldown و سقف روزانه =================
+# ================= ۱۰. موتور AI با مدیریت هوشمند Cooldown و سقف روزانه =================
 JSON_SCHEMA_INSTRUCTION = """
 Respond ONLY with valid JSON matching:
 {"selected_news":[{"selected_id":1,"category_id":"gaming","verification_status":"تأیید رسمی","is_breaking":false,"headline_persian":"...","summary_persian":"...","key_points_persian":["...","..."],"poll_question_persian":"","poll_options_persian":[],"topic_hashtags":["#گیمینگ"],"topic_fingerprint":"...","related_game":"","hype_score":7}]}
@@ -851,11 +863,12 @@ async def call_groq_provider(prompt: str) -> BatchProcessResult | None:
     if calls >= GROQ_DAILY_CALL_LIMIT or tokens >= GROQ_DAILY_TOKEN_LIMIT:
         print(f"ℹ️ عبور از Groq: سقف روزانه داخلی Groq ({calls}/{GROQ_DAILY_CALL_LIMIT} درخواست | {tokens} توکن) پر شده")
         return None
+    clean_groq_url = sanitize_plain_url(GROQ_BASE_URL)
     async with _build_http_client() as http_client:
         for key_idx, groq_key in enumerate(GROQ_API_KEYS, start=1):
             groq_client = AsyncOpenAI(
                 api_key=groq_key.strip(),
-                base_url="[https://api.groq.com/openai/v1](https://api.groq.com/openai/v1)",
+                base_url=clean_groq_url,
                 http_client=http_client
             )
             for model_name in GROQ_MODELS:
@@ -897,11 +910,12 @@ async def call_openrouter_provider(prompt: str) -> BatchProcessResult | None:
     if calls >= OPENROUTER_DAILY_CALL_LIMIT:
         print(f"ℹ️ عبور از OpenRouter: سقف روزانه داخلی ({calls}/{OPENROUTER_DAILY_CALL_LIMIT}) پر شده")
         return None
+    clean_or_url = sanitize_plain_url(OPENROUTER_BASE_URL)
     async with _build_http_client() as http_client:
         for key_idx, or_key in enumerate(OPENROUTER_API_KEYS, start=1):
             or_client = AsyncOpenAI(
                 api_key=or_key.strip(),
-                base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)",
+                base_url=clean_or_url,
                 http_client=http_client
             )
             for model_name in OPENROUTER_MODELS:
@@ -975,9 +989,10 @@ async def ask_ai_json(prompt: str, model_cls, temperature: float = 0.5):
         calls, _ = _get_daily_usage(name)
         if calls >= limit:
             return None
+        clean_base = sanitize_plain_url(base_url)
         async with _build_http_client() as http_client:
             for key in keys:
-                client = AsyncOpenAI(api_key=key.strip(), base_url=base_url, http_client=http_client)
+                client = AsyncOpenAI(api_key=key.strip(), base_url=clean_base, http_client=http_client)
                 for model in models:
                     try:
                         kwargs = {
@@ -1002,8 +1017,8 @@ async def ask_ai_json(prompt: str, model_cls, temperature: float = 0.5):
 
     backends = [
         gemini_fn,
-        lambda: openai_compat("groq", GROQ_API_KEYS, "[https://api.groq.com/openai/v1](https://api.groq.com/openai/v1)", GROQ_MODELS, GROQ_DAILY_CALL_LIMIT, True),
-        lambda: openai_compat("openrouter", OPENROUTER_API_KEYS, "[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)", OPENROUTER_MODELS, OPENROUTER_DAILY_CALL_LIMIT, False),
+        lambda: openai_compat("groq", GROQ_API_KEYS, GROQ_BASE_URL, GROQ_MODELS, GROQ_DAILY_CALL_LIMIT, True),
+        lambda: openai_compat("openrouter", OPENROUTER_API_KEYS, OPENROUTER_BASE_URL, OPENROUTER_MODELS, OPENROUTER_DAILY_CALL_LIMIT, False),
     ]
     start = _extra_ai_rot % 3
     _extra_ai_rot += 1
@@ -1013,7 +1028,7 @@ async def ask_ai_json(prompt: str, model_cls, temperature: float = 0.5):
             return result
     return None
 
-# ================= ۱۰. پست روزانه تقویم و بیتی از سعدی (ساعت ۱۱) =================
+# ================= ۱۱. پست روزانه تقویم و بیتی از سعدی (ساعت ۱۱) =================
 FALLBACK_VERSES = [
     ("بنی‌آدم اعضای یکدیگرند", "که در آفرینش ز یک گوهرند", "گلستان، باب اول، حکایت ۱۰"),
     ("تو کز محنت دیگران بی‌غمی", "نشاید که نامت نهند آدمی", "گلستان، باب اول، حکایت ۱۰"),
@@ -1035,16 +1050,19 @@ def _extract_beit(poem: dict):
     if not pairs:
         return None
     m1, m2 = random.choice(pairs)
-    return {"m1": persian_polish(m1), "m2": persian_polish(m2),
-            "title": poem.get("fullTitle") or "دیوان سعدی",
-            "url": "[https://ganjoor.net](https://ganjoor.net)" + full_url}
+    return {
+        "m1": persian_polish(m1),
+        "m2": persian_polish(m2),
+        "title": poem.get("fullTitle") or "دیوان سعدی",
+        "url": sanitize_plain_url("[https://ganjoor.net](https://ganjoor.net)" + full_url)
+    }
 
 async def fetch_saadi_verse(session) -> dict:
-    base = "[https://api.ganjoor.net/api/ganjoor](https://api.ganjoor.net/api/ganjoor)"
+    base = sanitize_plain_url(GANJOOR_API_BASE)
     try:
         poet_id = get_metadata("ganjoor_saadi_id", "")
         if not poet_id:
-            async with session.get(f"{base}/poets", timeout=aiohttp.ClientTimeout(total=15), headers=UA) as resp:
+            async with session.get(sanitize_plain_url(f"{base}/poets"), timeout=aiohttp.ClientTimeout(total=15), headers=UA) as resp:
                 poets = await resp.json(content_type=None)
             for p in poets:
                 name = (p.get("name") or "").replace("ي", "ی")
@@ -1055,7 +1073,8 @@ async def fetch_saadi_verse(session) -> dict:
         if poet_id:
             for _ in range(5):
                 try:
-                    async with session.get(f"{base}/poem/random?poetId={poet_id}", timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
+                    poem_api_url = sanitize_plain_url(f"{base}/poem/random?poetId={poet_id}")
+                    async with session.get(poem_api_url, timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
                         if resp.status != 200:
                             continue
                         poem = await resp.json(content_type=None)
@@ -1067,11 +1086,11 @@ async def fetch_saadi_verse(session) -> dict:
     except Exception:
         pass
     m1, m2, title = random.choice(FALLBACK_VERSES)
-    return {"m1": m1, "m2": m2, "title": title, "url": "[https://ganjoor.net/saadi/](https://ganjoor.net/saadi/)"}
+    return {"m1": m1, "m2": m2, "title": title, "url": sanitize_plain_url(GANJOOR_SAADI_FALLBACK_URL)}
 
 def build_daily_calendar_post(verse: dict, dt: datetime) -> str:
     d = format_dates(dt)
-    clean_url = sanitize_plain_url(verse["url"]) or "[https://ganjoor.net/saadi/](https://ganjoor.net/saadi/)"
+    clean_url = sanitize_plain_url(verse.get("url", "")) or sanitize_plain_url(GANJOOR_SAADI_FALLBACK_URL)
     lines = [
         "🗓 <b>تقویم امروز و کلام سعدی</b>",
         f"📅 امروز: <b>{d['weekday']}</b> ({d['weekday_order']})",
@@ -1093,7 +1112,7 @@ async def publish_daily_calendar_post_if_due(session):
     if get_metadata("last_calendar_post_date") == today:
         return
     verse = await fetch_saadi_verse(session)
-    clean_url = sanitize_plain_url(verse.get("url", "")) or "[https://ganjoor.net/saadi/](https://ganjoor.net/saadi/)"
+    clean_url = sanitize_plain_url(verse.get("url", "")) or sanitize_plain_url(GANJOOR_SAADI_FALLBACK_URL)
     verse["url"] = clean_url
     text = build_daily_calendar_post(verse, current_tehran)
     markup = InlineKeyboardMarkup([[InlineKeyboardButton("📜 خواندن شعر کامل در گنجور", url=clean_url)]])
@@ -1101,7 +1120,7 @@ async def publish_daily_calendar_post_if_due(session):
     set_metadata("last_calendar_post_date", today)
     await pin_post(msg.message_id)
 
-# ================= ۱۱. فیلم و موسیقی روزانه (ساعت ۱۲) =================
+# ================= ۱۲. فیلم و موسیقی روزانه (ساعت ۱۲) =================
 INTERNATIONAL_DAYS = {
     "02-13": ("World Radio Day", "روز جهانی رادیو"),
     "03-08": ("International Women's Day", "روز جهانی زن"),
@@ -1157,14 +1176,16 @@ async def omdb_lookup(session, title: str, year: int):
     if not OMDB_API_KEY:
         return None
     try:
-        url = f"[https://www.omdbapi.com/?apikey=](https://www.omdbapi.com/?apikey=){OMDB_API_KEY}&t={quote_plus(title)}&y={year}&type=movie"
+        omdb_base = sanitize_plain_url(OMDB_API_BASE)
+        url = sanitize_plain_url(f"{omdb_base}?apikey={OMDB_API_KEY}&t={quote_plus(title)}&y={year}&type=movie")
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
             data = await resp.json(content_type=None)
         if data.get("Response") != "True":
             return None
         rating = float(data.get("imdbRating", "0"))
         votes = int(to_en_digits(data.get("imdbVotes", "0")).replace(",", "") or 0)
-        poster = data.get("Poster") if str(data.get("Poster", "")).startswith("http") else None
+        raw_poster = sanitize_plain_url(str(data.get("Poster", "")))
+        poster = raw_poster if raw_poster.startswith("http") else None
         return {"rating": rating, "votes": votes, "id": data.get("imdbID"), "poster": poster}
     except Exception:
         return None
@@ -1226,12 +1247,14 @@ async def publish_daily_recommendation_if_due(session):
     rec, info, genre_key, genre_fa, occasion = result
     text = build_daily_rec_post(rec, info, genre_fa, occasion, current_tehran)
     m, mu = rec.movie, rec.music
-    imdb_url = f"[https://www.imdb.com/title/](https://www.imdb.com/title/){info['id']}/" if info and info.get("id") else \
+    raw_imdb = f"[https://www.imdb.com/title/](https://www.imdb.com/title/){info['id']}/" if info and info.get("id") else \
         f"[https://www.imdb.com/find/?q=](https://www.imdb.com/find/?q=){quote_plus(m.title_en + ' ' + str(m.year))}"
+    imdb_url = sanitize_plain_url(raw_imdb)
     music_q = quote_plus(f"{mu.artist} {mu.track}")
+    yt_url = sanitize_plain_url(f"[https://www.youtube.com/results?search_query=](https://www.youtube.com/results?search_query=){music_q}")
     markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("🎬 صفحه‌ی فیلم در IMDb", url=imdb_url)],
-        [InlineKeyboardButton("▶️ شنیدن موسیقی در YouTube", url=f"[https://www.youtube.com/results?search_query=](https://www.youtube.com/results?search_query=){music_q}")],
+        [InlineKeyboardButton("▶️ شنیدن موسیقی در YouTube", url=yt_url)],
     ])
     msg = await send_post(session, text, image_url=(info or {}).get("poster"), reply_markup=markup, filename="daily_rec.jpg")
     set_metadata("last_daily_rec_date", today)
@@ -1248,11 +1271,14 @@ async def run_daily_jobs(session):
         except Exception as e:
             print(f"⚠️ خطا در کار روزانه {job.__name__}: {e}")
 
-# ================= ۱۲. جمع‌آوری هم‌زمان فیدهای RSS =================
+# ================= ۱۳. جمع‌آوری هم‌زمان فیدهای RSS =================
 async def fetch_single_feed(session: aiohttp.ClientSession, sem: asyncio.Semaphore, category: str, url: str) -> list[dict]:
+    clean_feed_url = sanitize_plain_url(url)
+    if not clean_feed_url:
+        return []
     async with sem:
         try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
+            async with session.get(clean_feed_url, timeout=aiohttp.ClientTimeout(total=12), headers=UA) as resp:
                 if resp.status != 200:
                     return []
                 xml_data = await resp.text()
@@ -1277,7 +1303,7 @@ async def fetch_single_feed(session: aiohttp.ClientSession, sem: asyncio.Semapho
 
                 extracted.append({
                     'category': category,
-                    'source': url,
+                    'source': clean_feed_url,
                     'link': link,
                     'raw_title': title[:250],
                     'raw_text': cleaned_body[:450],
@@ -1326,7 +1352,7 @@ async def fetch_rss_sources(session: aiohttp.ClientSession):
     if new_count > 0:
         await run_semantic_clustering_and_deduplication()
 
-# ================= ۱۳. قالب ساده، مینیمال و غیرگیج‌کننده خبر =================
+# ================= ۱۴. قالب ساده، مینیمال و غیرگیج‌کننده خبر =================
 _CAT_EMOJI = {"gaming": "🎮", "technology": "💻", "hardware": "⚡", "crypto": "🪙", "film_tv": "🍿",
               "internet_culture": "🌐", "fun_meme": "😄", "music": "🎵", "general_news": "📰"}
 _VER_ICON = {
@@ -1410,12 +1436,12 @@ async def process_and_publish_batch(
     all_candidates = [
         {
             'id': r[0],
-            'link': r[1],
+            'link': sanitize_plain_url(r[1]),
             'category': r[2],
             'source': r[3],
             'title': r[4],
             'text': r[5][:420],
-            'image_url': r[6],
+            'image_url': sanitize_plain_url(r[6]) if r[6] else None,
             'has_video_or_audio': bool(r[7]),
             'source_count': r[8],
             'is_breaking_candidate': bool(r[9])
@@ -1486,7 +1512,7 @@ RULES:
         main_cat_hashtag = CATEGORY_HASHTAGS.get(cat_id, "#اخبار")
         final_caption = format_clean_news_post(sel, main_cat_hashtag)
 
-        news_link = sanitize_plain_url(orig_item.get('link', '')) or STORE_BASE_URL
+        news_link = sanitize_plain_url(orig_item.get('link', '')) or sanitize_plain_url(STORE_BASE_URL)
         keyboard = [
             [InlineKeyboardButton("❤️ پسندیدن این خبر (0)", callback_data=f"like_{orig_item['id']}")],
             [InlineKeyboardButton("🔗 مطالعه گزارش کامل در منبع اصلی", url=news_link)]
@@ -1534,7 +1560,7 @@ RULES:
             print(f"⚠️ خطا در ارسال خبر #{orig_item['id']}: {send_err}")
             update_news_status([orig_item['id']], 'failed', increment_retry=True)
 
-# ================= ۱۴. خلاصه روزانه (ساعت ۰۰:۰۰ به وقت تهران) =================
+# ================= ۱۵. خلاصه روزانه (ساعت ۰۰:۰۰ به وقت تهران) =================
 async def publish_daily_digest_if_due():
     current_tehran = get_current_tehran_time()
     today_str = current_tehran.strftime("%Y-%m-%d")
@@ -1583,7 +1609,7 @@ async def publish_daily_digest_if_due():
     except Exception as e:
         print(f"⚠️ خطا در ارسال خلاصه روزانه: {e}")
 
-# ================= ۱۵. مدیریت دکمه لایک =================
+# ================= ۱۶. مدیریت دکمه لایک =================
 async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
@@ -1607,7 +1633,7 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception:
             pass
 
-# ================= ۱۶. حلقه اصلی ۲۴ ساعته =================
+# ================= ۱۷. حلقه اصلی ۲۴ ساعته =================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     err_msg = str(context.error)
     if "Conflict" in err_msg:
