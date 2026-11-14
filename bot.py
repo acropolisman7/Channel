@@ -9,6 +9,7 @@ import time
 import random
 import hashlib
 import aiohttp
+import httpx
 import feedparser
 from typing import Literal
 from collections import Counter
@@ -21,6 +22,7 @@ from google import genai
 from google.genai import types
 from openai import AsyncOpenAI
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
+from telegram.error import NetworkError, TimedOut, RetryAfter
 from telegram.ext import Application, CallbackQueryHandler, ContextTypes
 
 try:
@@ -29,7 +31,7 @@ except ImportError:
     ReplyParameters = None
 
 # ================= ۱. تنظیمات اصلی و کلیدهای API =================
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN").strip()
 
 GEMINI_API_KEYS = [
     k.strip() for k in [
@@ -41,7 +43,7 @@ GEMINI_API_KEYS = [
 
 GROQ_API_KEYS = [k.strip() for k in os.environ.get("GROQ_API_KEYS", "").split(",") if k.strip()]
 OPENROUTER_API_KEYS = [k.strip() for k in os.environ.get("OPENROUTER_API_KEYS", "").split(",") if k.strip()]
-OMDB_API_KEY = os.environ.get("OMDB_API_KEY", "")
+OMDB_API_KEY = os.environ.get("OMDB_API_KEY", "").strip()
 
 TARGET_CHANNEL = '@jazebestore'
 STORE_BASE_URL = 'https://jazebestore.com'
@@ -80,8 +82,8 @@ GEMINI_MODELS = [
     'gemini-3.5-flash',
     'gemini-3.5-flash-lite',
 ]
-GROQ_MODELS = ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b', 'openai/gpt-oss-20b']
-OPENROUTER_MODELS = ['meta-llama/llama-3.3-70b-instruct:free', 'google/gemma-3-27b-it:free', 'openrouter/free']
+GROQ_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b']
+OPENROUTER_MODELS = ['openrouter/free', 'google/gemma-3-27b-it:free']
 
 CATEGORY_HASHTAGS = {
     "gaming": "#گیمینگ",
@@ -184,6 +186,16 @@ os.makedirs('temp_media', exist_ok=True)
 provider_rotation_index = 0
 _extra_ai_rot = 0
 _provider_cooldown_until = {"gemini": 0.0, "groq": 0.0, "openrouter": 0.0}
+
+def sanitize_plain_url(url: str) -> str:
+    """تبدیل لینک‌های احتمالی فرمت Markdown به URL خالص"""
+    if not url:
+        return ""
+    u = url.strip()
+    md_match = re.match(r'^\[[^\]]+\]\((https?://[^)]+)\)$', u)
+    if md_match:
+        u = md_match.group(1).strip()
+    return u.strip("[]() ")
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -576,10 +588,11 @@ def extract_rss_media_info(entry) -> tuple[str | None, bool]:
     return img_url, has_av
 
 async def download_image_from_url(session: aiohttp.ClientSession, url: str, filename: str) -> str | None:
-    if not url:
+    clean_url = sanitize_plain_url(url)
+    if not clean_url:
         return None
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15), headers=UA) as resp:
+        async with session.get(clean_url, timeout=aiohttp.ClientTimeout(total=15), headers=UA) as resp:
             if resp.status == 200:
                 filepath = os.path.join('temp_media', filename)
                 with open(filepath, 'wb') as f:
@@ -617,6 +630,7 @@ def _reply_kwargs(message_id):
 async def send_post(session, text, image_url=None, reply_markup=None, silent=False,
                     reply_to=None, filename="post.jpg", link_preview=False):
     text = _fit_lines(text, 3900)
+    clean_img_url = sanitize_plain_url(image_url) if image_url else None
 
     async def send_text_single(body, parse_mode, markup, reply_id, media_url=None):
         preview_opts = None
@@ -650,29 +664,48 @@ async def send_post(session, text, image_url=None, reply_markup=None, silent=Fal
                 **_reply_kwargs(reply_id)
             )
 
-    if image_url and _visible_len(text) <= 980:
-        img_path = await download_image_from_url(session, image_url, filename)
-        try:
-            if img_path and os.path.exists(img_path):
-                try:
-                    return await send_photo_single(img_path, text, "HTML", reply_markup, reply_to)
-                except Exception as photo_err:
-                    if "entities" in str(photo_err).lower() or "parse" in str(photo_err).lower():
-                        return await send_photo_single(img_path, _strip_tags(text), None, reply_markup, reply_to)
-        finally:
-            if img_path and os.path.exists(img_path):
-                try:
-                    os.remove(img_path)
-                except OSError:
-                    pass
+    img_path = None
+    if clean_img_url and _visible_len(text) <= 980:
+        img_path = await download_image_from_url(session, clean_img_url, filename)
 
     try:
-        return await send_text_single(text, "HTML", reply_markup, reply_to, media_url=image_url)
-    except Exception as err:
-        err_low = str(err).lower()
-        if "entities" in err_low or "parse" in err_low:
-            return await send_text_single(_strip_tags(text), None, reply_markup, reply_to, media_url=image_url)
-        return await send_text_single(text, "HTML", reply_markup, reply_to, media_url=None)
+        for attempt in range(1, 4):
+            try:
+                if img_path and os.path.exists(img_path):
+                    try:
+                        return await send_photo_single(img_path, text, "HTML", reply_markup, reply_to)
+                    except Exception as photo_err:
+                        err_str = str(photo_err).lower()
+                        if "entities" in err_str or "parse" in err_str:
+                            return await send_photo_single(img_path, _strip_tags(text), None, reply_markup, reply_to)
+                        if isinstance(photo_err, (NetworkError, TimedOut, RetryAfter)):
+                            raise
+                        img_path = None
+
+                try:
+                    return await send_text_single(text, "HTML", reply_markup, reply_to, media_url=clean_img_url)
+                except Exception as err:
+                    err_low = str(err).lower()
+                    if "entities" in err_low or "parse" in err_low:
+                        return await send_text_single(_strip_tags(text), None, reply_markup, reply_to, media_url=clean_img_url)
+                    if isinstance(err, (NetworkError, TimedOut, RetryAfter)):
+                        raise
+                    return await send_text_single(text, "HTML", reply_markup, reply_to, media_url=None)
+
+            except RetryAfter as ra:
+                wait_sec = int(getattr(ra, "retry_after", 10)) + 2
+                await asyncio.sleep(wait_sec)
+            except (NetworkError, TimedOut) as net_err:
+                if attempt == 3:
+                    raise
+                print(f"⚠️ اختلال شبکه در ارسال به تلگرام (تلاش {attempt}/3): {net_err}")
+                await asyncio.sleep(attempt * 5)
+    finally:
+        if img_path and os.path.exists(img_path):
+            try:
+                os.remove(img_path)
+            except OSError:
+                pass
 
 # ================= ۷. پین کردن تا ۰۰:۰۰ =================
 def _pins_load() -> list:
@@ -737,6 +770,20 @@ JSON_SCHEMA_INSTRUCTION = """
 Respond ONLY with valid JSON matching:
 {"selected_news":[{"selected_id":1,"category_id":"gaming","verification_status":"تأیید رسمی","is_breaking":false,"headline_persian":"...","summary_persian":"...","key_points_persian":["...","..."],"poll_question_persian":"","poll_options_persian":[],"topic_hashtags":["#گیمینگ"],"topic_fingerprint":"...","related_game":"","hype_score":7}]}
 """
+
+def _build_http_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        timeout=httpx.Timeout(40.0, connect=20.0),
+        http2=False,
+        trust_env=False,
+        follow_redirects=True
+    )
+
+def _format_net_error(e: Exception) -> str:
+    cause = getattr(e, "__cause__", None)
+    if cause:
+        return f"{type(e).__name__}: {e} | cause: {type(cause).__name__}: {cause}"
+    return f"{type(e).__name__}: {e}"
 
 def _extract_json_from_llm_content(raw_content: str | None) -> dict:
     if not raw_content or not isinstance(raw_content, str):
@@ -804,35 +851,40 @@ async def call_groq_provider(prompt: str) -> BatchProcessResult | None:
     if calls >= GROQ_DAILY_CALL_LIMIT or tokens >= GROQ_DAILY_TOKEN_LIMIT:
         print(f"ℹ️ عبور از Groq: سقف روزانه داخلی Groq ({calls}/{GROQ_DAILY_CALL_LIMIT} درخواست | {tokens} توکن) پر شده")
         return None
-    for key_idx, groq_key in enumerate(GROQ_API_KEYS, start=1):
-        groq_client = AsyncOpenAI(api_key=groq_key, base_url="[https://api.groq.com/openai/v1](https://api.groq.com/openai/v1)")
-        for model_name in GROQ_MODELS:
-            try:
-                print(f"تلاش با Groq (کلید #{key_idx} | {model_name})...")
-                completion = await groq_client.chat.completions.create(
-                    model=model_name,
-                    messages=[
-                        {"role": "system", "content": "Chief Editor JSON API. " + JSON_SCHEMA_INSTRUCTION},
-                        {"role": "user", "content": prompt}
-                    ],
-                    response_format={"type": "json_object"},
-                    temperature=0.2
-                )
-                content = completion.choices[0].message.content if completion.choices else None
-                used_toks = getattr(completion.usage, "total_tokens", 1400) if getattr(completion, "usage", None) else 1400
-                _record_daily_usage("groq", used_toks)
-                raw_dict = _extract_json_from_llm_content(content)
-                validated = BatchProcessResult.model_validate(raw_dict)
-                print(f"✅ موفقیت با Groq ({model_name} | مصرف: {used_toks} توکن)")
-                return validated
-            except (ValidationError, json.JSONDecodeError, ValueError):
-                continue
-            except Exception as e:
-                print(f"⚠️ خطا در Groq ({model_name}): {e}")
-                if _is_quota_error(e):
-                    _provider_cooldown_until["groq"] = time.time() + 900
-                    return None
-                await asyncio.sleep(1)
+    async with _build_http_client() as http_client:
+        for key_idx, groq_key in enumerate(GROQ_API_KEYS, start=1):
+            groq_client = AsyncOpenAI(
+                api_key=groq_key.strip(),
+                base_url="[https://api.groq.com/openai/v1](https://api.groq.com/openai/v1)",
+                http_client=http_client
+            )
+            for model_name in GROQ_MODELS:
+                try:
+                    print(f"تلاش با Groq (کلید #{key_idx} | {model_name})...")
+                    completion = await groq_client.chat.completions.create(
+                        model=model_name,
+                        messages=[
+                            {"role": "system", "content": "Chief Editor JSON API. " + JSON_SCHEMA_INSTRUCTION},
+                            {"role": "user", "content": prompt}
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=0.2
+                    )
+                    content = completion.choices[0].message.content if completion.choices else None
+                    used_toks = getattr(completion.usage, "total_tokens", 1400) if getattr(completion, "usage", None) else 1400
+                    _record_daily_usage("groq", used_toks)
+                    raw_dict = _extract_json_from_llm_content(content)
+                    validated = BatchProcessResult.model_validate(raw_dict)
+                    print(f"✅ موفقیت با Groq ({model_name} | مصرف: {used_toks} توکن)")
+                    return validated
+                except (ValidationError, json.JSONDecodeError, ValueError):
+                    continue
+                except Exception as e:
+                    print(f"⚠️ خطا در Groq ({model_name}): {_format_net_error(e)}")
+                    if _is_quota_error(e):
+                        _provider_cooldown_until["groq"] = time.time() + 900
+                        return None
+                    await asyncio.sleep(1)
     return None
 
 async def call_openrouter_provider(prompt: str) -> BatchProcessResult | None:
@@ -845,33 +897,38 @@ async def call_openrouter_provider(prompt: str) -> BatchProcessResult | None:
     if calls >= OPENROUTER_DAILY_CALL_LIMIT:
         print(f"ℹ️ عبور از OpenRouter: سقف روزانه داخلی ({calls}/{OPENROUTER_DAILY_CALL_LIMIT}) پر شده")
         return None
-    for key_idx, or_key in enumerate(OPENROUTER_API_KEYS, start=1):
-        or_client = AsyncOpenAI(api_key=or_key, base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)")
-        for model_name in OPENROUTER_MODELS:
-            try:
-                print(f"تلاش با OpenRouter (کلید #{key_idx} | {model_name})...")
-                completion = await or_client.chat.completions.create(
-                    model=model_name,
-                    messages=[
-                        {"role": "system", "content": "Chief Editor JSON API. " + JSON_SCHEMA_INSTRUCTION},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.2
-                )
-                content = completion.choices[0].message.content if completion.choices else None
-                _record_daily_usage("openrouter", 1400)
-                raw_dict = _extract_json_from_llm_content(content)
-                validated = BatchProcessResult.model_validate(raw_dict)
-                print(f"✅ موفقیت با OpenRouter ({model_name})")
-                return validated
-            except (ValidationError, json.JSONDecodeError, ValueError):
-                continue
-            except Exception as e:
-                print(f"⚠️ خطا در OpenRouter ({model_name}): {e}")
-                if _is_quota_error(e):
-                    _provider_cooldown_until["openrouter"] = time.time() + 1800
-                    return None
-                await asyncio.sleep(1)
+    async with _build_http_client() as http_client:
+        for key_idx, or_key in enumerate(OPENROUTER_API_KEYS, start=1):
+            or_client = AsyncOpenAI(
+                api_key=or_key.strip(),
+                base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)",
+                http_client=http_client
+            )
+            for model_name in OPENROUTER_MODELS:
+                try:
+                    print(f"تلاش با OpenRouter (کلید #{key_idx} | {model_name})...")
+                    completion = await or_client.chat.completions.create(
+                        model=model_name,
+                        messages=[
+                            {"role": "system", "content": "Chief Editor JSON API. " + JSON_SCHEMA_INSTRUCTION},
+                            {"role": "user", "content": prompt}
+                        ],
+                        temperature=0.2
+                    )
+                    content = completion.choices[0].message.content if completion.choices else None
+                    _record_daily_usage("openrouter", 1400)
+                    raw_dict = _extract_json_from_llm_content(content)
+                    validated = BatchProcessResult.model_validate(raw_dict)
+                    print(f"✅ موفقیت با OpenRouter ({model_name})")
+                    return validated
+                except (ValidationError, json.JSONDecodeError, ValueError):
+                    continue
+                except Exception as e:
+                    print(f"⚠️ خطا در OpenRouter ({model_name}): {_format_net_error(e)}")
+                    if _is_quota_error(e):
+                        _provider_cooldown_until["openrouter"] = time.time() + 1800
+                        return None
+                    await asyncio.sleep(1)
     return None
 
 async def generate_news_with_fallback(prompt: str) -> BatchProcessResult | None:
@@ -918,28 +975,29 @@ async def ask_ai_json(prompt: str, model_cls, temperature: float = 0.5):
         calls, _ = _get_daily_usage(name)
         if calls >= limit:
             return None
-        for key in keys:
-            client = AsyncOpenAI(api_key=key, base_url=base_url)
-            for model in models:
-                try:
-                    kwargs = {
-                        "model": model,
-                        "temperature": temperature,
-                        "messages": [{"role": "system", "content": sys_msg}, {"role": "user", "content": prompt}],
-                    }
-                    if use_json_mode:
-                        kwargs["response_format"] = {"type": "json_object"}
-                    comp = await client.chat.completions.create(**kwargs)
-                    content = comp.choices[0].message.content if comp.choices else None
-                    _record_daily_usage(name, 1000)
-                    return model_cls.model_validate(_extract_json_from_llm_content(content))
-                except (ValidationError, json.JSONDecodeError, ValueError):
-                    continue
-                except Exception as e:
-                    if _is_quota_error(e):
-                        _provider_cooldown_until[name] = time.time() + 900
-                        return None
-                    break
+        async with _build_http_client() as http_client:
+            for key in keys:
+                client = AsyncOpenAI(api_key=key.strip(), base_url=base_url, http_client=http_client)
+                for model in models:
+                    try:
+                        kwargs = {
+                            "model": model,
+                            "temperature": temperature,
+                            "messages": [{"role": "system", "content": sys_msg}, {"role": "user", "content": prompt}],
+                        }
+                        if use_json_mode:
+                            kwargs["response_format"] = {"type": "json_object"}
+                        comp = await client.chat.completions.create(**kwargs)
+                        content = comp.choices[0].message.content if comp.choices else None
+                        _record_daily_usage(name, 1000)
+                        return model_cls.model_validate(_extract_json_from_llm_content(content))
+                    except (ValidationError, json.JSONDecodeError, ValueError):
+                        continue
+                    except Exception as e:
+                        if _is_quota_error(e):
+                            _provider_cooldown_until[name] = time.time() + 900
+                            return None
+                        break
         return None
 
     backends = [
@@ -1013,6 +1071,7 @@ async def fetch_saadi_verse(session) -> dict:
 
 def build_daily_calendar_post(verse: dict, dt: datetime) -> str:
     d = format_dates(dt)
+    clean_url = sanitize_plain_url(verse["url"]) or "[https://ganjoor.net/saadi/](https://ganjoor.net/saadi/)"
     lines = [
         "🗓 <b>تقویم امروز و کلام سعدی</b>",
         f"📅 امروز: <b>{d['weekday']}</b> ({d['weekday_order']})",
@@ -1021,7 +1080,7 @@ def build_daily_calendar_post(verse: dict, dt: datetime) -> str:
         "",
         "📜 <b>بیتی از سعدی</b>",
         f"<blockquote>{html.escape(verse['m1'])}\n{html.escape(verse['m2'])}</blockquote>",
-        f"✍️ سعدی شیرازی | <a href=\"{html.escape(verse['url'])}\">{html.escape(verse['title'])}</a>",
+        f"✍️ سعدی شیرازی | <a href=\"{html.escape(clean_url)}\">{html.escape(verse['title'])}</a>",
         f"\n🏷 #تقویم_روز #سعدی #شعر_فارسی{CHANNEL_SIGNATURE}",
     ]
     return "\n".join(lines)
@@ -1034,8 +1093,10 @@ async def publish_daily_calendar_post_if_due(session):
     if get_metadata("last_calendar_post_date") == today:
         return
     verse = await fetch_saadi_verse(session)
+    clean_url = sanitize_plain_url(verse.get("url", "")) or "[https://ganjoor.net/saadi/](https://ganjoor.net/saadi/)"
+    verse["url"] = clean_url
     text = build_daily_calendar_post(verse, current_tehran)
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton("📜 خواندن شعر کامل در گنجور", url=verse["url"])]])
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("📜 خواندن شعر کامل در گنجور", url=clean_url)]])
     msg = await send_post(session, text, reply_markup=markup, silent=False)
     set_metadata("last_calendar_post_date", today)
     await pin_post(msg.message_id)
@@ -1199,7 +1260,7 @@ async def fetch_single_feed(session: aiohttp.ClientSession, sem: asyncio.Semapho
             feed = await asyncio.to_thread(feedparser.parse, xml_data)
             extracted = []
             for entry in feed.entries[:2]:
-                link = getattr(entry, 'link', None)
+                link = sanitize_plain_url(getattr(entry, 'link', None))
                 if not link:
                     continue
 
@@ -1220,7 +1281,7 @@ async def fetch_single_feed(session: aiohttp.ClientSession, sem: asyncio.Semapho
                     'link': link,
                     'raw_title': title[:250],
                     'raw_text': cleaned_body[:450],
-                    'image_url': img_url,
+                    'image_url': sanitize_plain_url(img_url) if img_url else None,
                     'has_video_or_audio': 1 if has_av else 0,
                     'is_breaking_candidate': 1 if is_breaking else 0
                 })
@@ -1425,7 +1486,7 @@ RULES:
         main_cat_hashtag = CATEGORY_HASHTAGS.get(cat_id, "#اخبار")
         final_caption = format_clean_news_post(sel, main_cat_hashtag)
 
-        news_link = orig_item.get('link', STORE_BASE_URL)
+        news_link = sanitize_plain_url(orig_item.get('link', '')) or STORE_BASE_URL
         keyboard = [
             [InlineKeyboardButton("❤️ پسندیدن این خبر (0)", callback_data=f"like_{orig_item['id']}")],
             [InlineKeyboardButton("🔗 مطالعه گزارش کامل در منبع اصلی", url=news_link)]
@@ -1506,7 +1567,8 @@ async def publish_daily_digest_if_due():
     ]
     for _, headline, url in rows[:8]:
         clean_h = sanitize_telegram_html(headline)
-        digest_lines.append(f"• <a href=\"{html.escape(url)}\">{clean_h}</a>")
+        clean_u = sanitize_plain_url(url)
+        digest_lines.append(f"• <a href=\"{html.escape(clean_u)}\">{clean_h}</a>")
 
     digest_lines.append(f"\n🏷 #مرور_روزانه #گیمینگ #تکنولوژی{CHANNEL_SIGNATURE}")
 
@@ -1598,15 +1660,27 @@ def main():
     application = (
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
-        .get_updates_read_timeout(30)
-        .get_updates_connect_timeout(30)
+        .connection_pool_size(16)
+        .connect_timeout(30.0)
+        .read_timeout(45.0)
+        .write_timeout(45.0)
+        .pool_timeout(30.0)
+        .get_updates_connect_timeout(30.0)
+        .get_updates_read_timeout(45.0)
+        .http_version("1.1")
+        .get_updates_http_version("1.1")
         .build()
     )
     application.add_handler(CallbackQueryHandler(button_click_handler))
     application.add_error_handler(error_handler)
 
     async def post_init(app: Application):
-        await app.bot.delete_webhook(drop_pending_updates=True)
+        global bot
+        bot = app.bot
+        try:
+            await app.bot.delete_webhook(drop_pending_updates=True)
+        except Exception as e:
+            print(f"⚠️ خطای موقت در delete_webhook: {e}")
         asyncio.create_task(background_news_loop(app.bot))
 
     application.post_init = post_init
@@ -1615,6 +1689,7 @@ def main():
     application.run_polling(
         drop_pending_updates=True,
         allowed_updates=["callback_query"],
+        bootstrap_retries=-1,
         close_loop=False
     )
 
