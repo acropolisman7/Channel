@@ -160,24 +160,24 @@ def persian_polish(text: str) -> str:
     return text.strip()
 
 def fix_bidi_persian(text: str) -> str:
-    """جلوگیری کامل از بهم‌ریختگی کلمات فارسی و انگلیسی در تلگرام"""
+    """
+    تنظیم جهت راست‌به‌چپ در ابتدای هر خط و داخل تگ‌های بلوکی (مثل blockquote)
+    بدون تزریق کاراکتر در وسط یا اطراف کلمات انگلیسی تا هیچ کلمه‌ای مثل Grand Theft Auto 6 نشکند.
+    """
     if not text:
         return ""
-    lines = text.split("\n")
+    cleaned = text.replace("\u200f", "").replace("\u200e", "")
+    lines = cleaned.split("\n")
     fixed_lines = []
     for line in lines:
-        if not line.strip():
+        stripped = line.strip()
+        if not stripped:
             fixed_lines.append("")
             continue
-        if line.lstrip().startswith("<"):
-            line_rtl = re.sub(r"^(<[^>]+>)", rf"\1{RLM}", line.lstrip(), count=1)
+        if stripped.startswith("<"):
+            line_rtl = re.sub(r"^((?:<[^>]+>)+)", rf"{RLM}\1{RLM}", stripped, count=1)
         else:
-            line_rtl = f"{RLM}{line}"
-        line_rtl = re.sub(
-            r"(?<![\w#&;/=])([A-Za-z][A-Za-z0-9\s\.\-\+\_\:\&\']*?[A-Za-z0-9]|[A-Za-z]{2,})(?![^<]*>)",
-            rf"{RLM}\1{RLM}",
-            line_rtl
-        )
+            line_rtl = f"{RLM}{stripped}"
         fixed_lines.append(line_rtl)
     return "\n".join(fixed_lines)
 
@@ -778,12 +778,14 @@ CRITICAL EDITORIAL PHILOSOPHY — QUALITY OVER QUANTITY:
 STRICT PERSIAN JOURNALISTIC WRITING & ACCURACY RULES:
 1. NO LITERAL / MACHINE TRANSLATION (ترجمه ماشینی اکیداً ممنوع):
    - Rewrite each story as an original, fluent, engaging Persian journalistic report.
+   - Do NOT insert any invisible Unicode characters (no RLM/LRM) inside your output text.
    - Use natural Persian idioms (e.g., «صف بررسی بازی‌های Steam» instead of «پشت‌سرگیری بررسی‌ها»; «محتوای ساخته‌شده با هوش مصنوعی» instead of «ارسال‌های AI»; «مهار و بازیابی مرحله بالایی Starship» instead of «گرفتن مرحله بالایی»).
 2. START EVERY HEADLINE & SENTENCE WITH A PERSIAN WORD:
    - Never start `headline_persian` or `summary_persian` with an English word (e.g., write «تلاش بی‌سابقه SpaceX برای...» instead of «SpaceX برای اولین بار...»).
-   - Keep brand names, game titles, and hardware models in exact English.
-3. RICH DETAIL & ATTRIBUTION:
-   - Include concrete numbers, prices, release windows, and direct attributions from `full_article_text`.
+   - Keep brand names, game titles, and hardware models in exact English (e.g., Grand Theft Auto 6, SpaceX, Steam, BMO Capital Markets).
+3. FINANCIAL & FACTUAL PRECISION (CRITICAL):
+   - Never present analyst price assumptions or Average Selling Price (ASP) estimates as official confirmed prices! Always write «بر اساس برآورد/فرض تحلیلگران مؤسسه X، قیمت پایه حدود ۸۰ دلار پیش‌بینی شده است» instead of stating it as a confirmed retail fact.
+   - Include concrete numbers, release windows, and direct attributions from `full_article_text`.
    - Wrap 1 to 3 key facts/numbers in `<b>...</b>` inside `summary_persian`.
 4. `verification_status` must strictly be one of: "تأیید رسمی", "گزارش رسانه‌ای", or "پیش‌بینی تحلیلگران".
 
