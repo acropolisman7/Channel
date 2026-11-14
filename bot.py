@@ -69,6 +69,7 @@ UA = {
 }
 REDDIT_UA = {"User-Agent": "JazebeStoreNewsBot/2.0 (by /u/jazebestore)"}
 RLM = "\u200f"
+ZWNJ = "\u200c"
 
 CATEGORY_HASHTAGS = {
     "gaming": "#گیمینگ",
@@ -154,8 +155,8 @@ def persian_polish(text: str) -> str:
     if not text:
         return ""
     text = text.replace("ي", "ی").replace("ك", "ک").replace("ة", "ه")
-    text = re.sub(r"\b(می|نمی)\s+([آ-ی]{2,})", r"\1\u200c\2", text)
-    text = re.sub(r"([آ-ی]{2,})\s+(ها|های|هایی|تر|ترین|ام|ات|اش|ایم|اید|اند)\b", r"\1\u200c\2", text)
+    text = re.sub(r"\b(می|نمی)\s+([آ-ی]{2,})", rf"\1{ZWNJ}\2", text)
+    text = re.sub(r"([آ-ی]{2,})\s+(ها|های|هایی|تر|ترین|ام|ات|اش|ایم|اید|اند)\b", rf"\1{ZWNJ}\2", text)
     return text.strip()
 
 def fix_bidi_persian(text: str) -> str:
@@ -1067,7 +1068,7 @@ async def publish_daily_calendar_post_if_due(session: aiohttp.ClientSession):
 
     beit = await fetch_saadi_verse(session)
     lines = [
-        f"📅 <b>تقویم امروز و شعر صبحگاهی</b>",
+        "📅 <b>تقویم امروز و شعر صبحگاهی</b>",
         f"🗓 تاریخ میلادی: {today_str}",
         "",
         f"📜 <b>بیتی از سعدی ({html.escape(beit['title'])}):</b>",
