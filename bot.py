@@ -8,7 +8,7 @@ import html
 import random
 import hashlib
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo
 from urllib.parse import quote_plus
 from typing import Literal
@@ -17,7 +17,7 @@ import aiohttp
 import httpx
 import feedparser
 from bs4 import BeautifulSoup
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
 from openai import AsyncOpenAI
@@ -162,7 +162,7 @@ def persian_polish(text: str) -> str:
 def fix_bidi_persian(text: str) -> str:
     """
     تنظیم جهت راست‌به‌چپ در ابتدای هر خط و داخل تگ‌های بلوکی (مثل blockquote)
-    بدون تزریق کاراکتر در وسط یا اطراف کلمات انگلیسی تا هیچ کلمه‌ای مثل Grand Theft Auto 6 نشکند.
+    بدون تزریق کاراکتر در وسط یا اطراف کلمات انگلیسی تا هیچ کلمه‌ای نشکند.
     """
     if not text:
         return ""
@@ -367,7 +367,7 @@ class MemePick(BaseModel):
     context_persian: str = Field(default="", description="1 short Persian sentence explaining the reference if helpful")
     is_safe_and_funny: bool = False
 
-# ================= ۵. موتور هوش مصنوعی با چرخش خودکار =================
+# ================= ۵. موتور هوش مصنوعی با Cooldown روی 429/503 و تایم‌اوت سخت =================
 async def call_gemini_json(prompt: str, schema_cls, temperature: float = 0.25):
     now_ts = datetime.now().timestamp()
     for key_idx, api_key in enumerate(GEMINI_API_KEYS, start=1):
@@ -377,22 +377,26 @@ async def call_gemini_json(prompt: str, schema_cls, temperature: float = 0.25):
             if provider_cooldowns.get(cd_key, 0) > now_ts:
                 continue
             try:
-                resp = await asyncio.to_thread(
-                    client.models.generate_content,
-                    model=model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=schema_cls,
-                        temperature=temperature
-                    )
+                resp = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        client.models.generate_content,
+                        model=model_name,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            response_schema=schema_cls,
+                            temperature=temperature
+                        )
+                    ),
+                    timeout=45.0
                 )
                 raw = json.loads(resp.text)
                 return schema_cls.model_validate(raw)
             except Exception as e:
                 err_str = str(e)
-                if "429" in err_str or "ResourceExhausted" in err_str:
-                    provider_cooldowns[cd_key] = now_ts + 1800
+                if any(code in err_str for code in ("429", "503", "ResourceExhausted", "UNAVAILABLE")):
+                    cd_sec = 1800 if "429" in err_str else 300
+                    provider_cooldowns[cd_key] = now_ts + cd_sec
                 print(f"⚠️ خطا در Gemini ({model_name} | کلید #{key_idx}): {err_str[:140]}")
     return None
 
@@ -409,22 +413,25 @@ async def call_openai_compat_json(provider: str, base_url: str, keys: list[str],
                 if provider_cooldowns.get(cd_key, 0) > now_ts:
                     continue
                 try:
-                    comp = await client.chat.completions.create(
-                        model=model_name,
-                        messages=[
-                            {"role": "system", "content": f"Return ONLY valid JSON matching this schema:\n{schema_hint}"},
-                            {"role": "user", "content": prompt}
-                        ],
-                        response_format={"type": "json_object"},
-                        temperature=temperature
+                    comp = await asyncio.wait_for(
+                        client.chat.completions.create(
+                            model=model_name,
+                            messages=[
+                                {"role": "system", "content": f"Return ONLY valid JSON matching this schema:\n{schema_hint}"},
+                                {"role": "user", "content": prompt}
+                            ],
+                            response_format={"type": "json_object"},
+                            temperature=temperature
+                        ),
+                        timeout=45.0
                     )
                     content = comp.choices[0].message.content or "{}"
                     content = re.sub(r"^```json\s*|\s*```$", "", content.strip())
                     return schema_cls.model_validate(json.loads(content))
                 except Exception as e:
                     err_str = str(e)
-                    if "429" in err_str:
-                        provider_cooldowns[cd_key] = now_ts + 1800
+                    if any(code in err_str for code in ("429", "503", "UNAVAILABLE")):
+                        provider_cooldowns[cd_key] = now_ts + (1800 if "429" in err_str else 300)
                     print(f"⚠️ خطا در {provider} ({model_name} | کلید #{key_idx}): {err_str[:140]}")
         finally:
             await http_client.aclose()
@@ -1270,7 +1277,25 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     else:
         print(f"⚠️ هشدار تلگرام: {err_msg[:160]}")
 
-# ================= ۱۱. حلقه اصلی ۲۴ ساعته و راه‌اندازی ایمن =================
+# ================= ۱۱. حلقه اصلی ۲۴ ساعته با لاگ Heartbeat و تایم‌اوت سخت =================
+async def _run_single_cycle(shared_session: aiohttp.ClientSession, last_regular_ts: float) -> float:
+    now_ts = datetime.now().timestamp()
+    tehran_str = get_current_tehran_time().strftime("%Y-%m-%d %H:%M")
+    print(f"💓 Heartbeat | {tehran_str} تهران")
+
+    await collect_all_feeds(shared_session)
+    await process_and_publish_batch(shared_session, breaking_only=True)
+
+    if now_ts - last_regular_ts >= REGULAR_CYCLE_SECONDS:
+        print(f"🔄 شروع چرخه ۱ ساعته تحریریه ({tehran_str})...")
+        await process_and_publish_batch(shared_session, breaking_only=False)
+        await publish_community_meme_if_due(shared_session)
+        last_regular_ts = now_ts
+
+    await publish_daily_calendar_post_if_due(shared_session)
+    await publish_daily_digest_if_due()
+    return last_regular_ts
+
 async def background_news_loop():
     init_db()
     last_regular_ts = 0.0
@@ -1278,21 +1303,12 @@ async def background_news_loop():
     async with aiohttp.ClientSession(connector=connector) as shared_session:
         while True:
             try:
-                now_ts = datetime.now().timestamp()
-                await collect_all_feeds(shared_session)
-
-                # بررسی خبر فوری
-                await process_and_publish_batch(shared_session, breaking_only=True)
-
-                # چرخه ۱ ساعته: حداکثر ۳ خبر باکیفیت + میم کاربران
-                if now_ts - last_regular_ts >= REGULAR_CYCLE_SECONDS:
-                    await process_and_publish_batch(shared_session, breaking_only=False)
-                    await publish_community_meme_if_due(shared_session)
-                    last_regular_ts = now_ts
-
-                # پست صبحگاهی تقویم و شعر سعدی + مرور تحلیلی شبانه
-                await publish_daily_calendar_post_if_due(shared_session)
-                await publish_daily_digest_if_due()
+                last_regular_ts = await asyncio.wait_for(
+                    _run_single_cycle(shared_session, last_regular_ts),
+                    timeout=180.0
+                )
+            except asyncio.TimeoutError:
+                print("⏱️ هشدار: اجرای چرخه بیش از ۳ دقیقه طول کشید و ریست شد؛ ادامه در نوبت بعد...")
             except Exception as loop_err:
                 print(f"⚠️ خطا در حلقه اصلی ربات: {loop_err}")
 
