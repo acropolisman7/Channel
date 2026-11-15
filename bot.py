@@ -8,7 +8,7 @@ import html
 import random
 import hashlib
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from urllib.parse import quote_plus
 from typing import Literal
@@ -36,15 +36,22 @@ GEMINI_API_KEYS = [
         os.environ.get("GEMINI_API_KEY_3", "")
     ] if k.strip() and not k.startswith("YOUR_")
 ]
-GROQ_API_KEYS = [k.strip() for k in os.environ.get("GROQ_API_KEYS", "").split(",") if k.strip()]
-OPENROUTER_API_KEYS = [k.strip() for k in os.environ.get("OPENROUTER_API_KEYS", "").split(",") if k.strip()]
+
+_raw_groq = os.environ.get("GROQ_API_KEYS", "") or os.environ.get("GROQ_API_KEY", "")
+GROQ_API_KEYS = [k.strip() for k in _raw_groq.split(",") if k.strip() and not k.startswith("YOUR_")]
+
+_raw_or = os.environ.get("OPENROUTER_API_KEYS", "") or os.environ.get("OPENROUTER_API_KEY", "")
+OPENROUTER_API_KEYS = [k.strip() for k in _raw_or.split(",") if k.strip() and not k.startswith("YOUR_")]
 
 TARGET_CHANNEL = "@jazebestore"
 STORE_BASE_URL = "https://jazebestore.com"
-CHANNEL_SIGNATURE = "\n\n🎮 @jazebestore"
+LRM = "\u200e"
+RLM = "\u200f"
+ZWNJ = "\u200c"
+CHANNEL_SIGNATURE = f"\n\n🎮 {LRM}@jazebestore{LRM}"
 DB_PATH = "rss_news_history.db"
 
-# اولویت کیفیت بر کمیت: هر ۱ ساعت حداکثر ۳ خبر غنی + بررسی خبر فوری هر ۴ دقیقه
+# اولویت کیفیت بر کمیت: هر ۱ ساعت حداکثر ۳ خبر ممتاز + بررسی خبر فوری هر ۴ دقیقه
 BREAKING_CHECK_INTERVAL_SECONDS = 240
 REGULAR_CYCLE_SECONDS = 3600
 MAX_NEWS_PER_CYCLE = 3
@@ -55,21 +62,50 @@ MEME_GAP_MINUTES = 55
 DAILY_CALENDAR_HOUR = 9
 DAILY_DIGEST_HOUR = 23
 
-GEMINI_MODELS = [
+def _env_list(name: str, default: list[str]) -> list[str]:
+    raw = os.environ.get(name, "")
+    items = [x.strip() for x in raw.split(",") if x.strip()]
+    return items or default
+
+# فهرست مدل‌های متنی فعال (بررسی‌شده در نوامبر ۲۰۲۶؛ فهرست‌ها مرتب تغییر می‌کنند)
+GEMINI_MODELS = _env_list("GEMINI_MODELS", [
+    "gemini-4-argon",
+    "gemini-4-hydrogen",
     "gemini-3.8-flash",
-    "gemini-3.5-flash",
+    "gemini-3.6-flash",
     "gemini-3.5-flash-lite",
-    "gemini-2.5-flash",
-]
-GROQ_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
-OPENROUTER_MODELS = ["openrouter/free", "google/gemma-3-27b-it:free"]
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash-lite",
+    "gemini-4-carbon",          # قوی‌ترین؛ اگر در پلن شما محدود باشد خودکار کنار گذاشته می‌شود
+])
+
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+GROQ_MODELS = _env_list("GROQ_MODELS", [
+    "openai/gpt-oss-120b",
+    "llama-3.3-70b-versatile",
+    "qwen/qwen3.8-27b",
+    "openai/gpt-oss-20b",
+    "llama-3.1-8b-instant",
+])
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_MODELS = _env_list("OPENROUTER_MODELS", [
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "nvidia/nemotron-3.5-super-vl:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "google/gemma-4-31b-it:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "dots-studio/dots-3-note-preview:free",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "openrouter/free",          # روتر تصادفی؛ آخرین گزینه
+])
+
+PROVIDER_ORDER = ["Gemini", "Groq", "OpenRouter"]
 
 UA = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 }
 REDDIT_UA = {"User-Agent": "JazebeStoreNewsBot/2.0 (by /u/jazebestore)"}
-RLM = "\u200f"
-ZWNJ = "\u200c"
 
 CATEGORY_HASHTAGS = {
     "gaming": "#گیمینگ",
@@ -134,13 +170,57 @@ MEME_SUBREDDITS = {
 }
 
 FALLBACK_VERSES = [
-    ("بنی‌آدم اعضای یکدیگرند", "که در آفرینش ز یک گوهرند", "گلستان سعدی"),
-    ("چو عضوی به درد آورد روزگار", "دگر عضوها را نماند قرار", "گلستان سعدی"),
-    ("به جهان خرم از آنم که جهان خرم از اوست", "عاشقم بر همه عالم که همه عالم از اوست", "غزلیات سعدی"),
+    ("بنی‌آدم اعضای یکدیگرند", "که در آفرینش ز یک گوهرند", "گلستان، باب اول، حکایت ۱۰"),
+    ("چو عضوی به درد آورد روزگار", "دگر عضوها را نماند قرار", "گلستان، باب اول، حکایت ۱۰"),
+    ("تو کز محنت دیگران بی‌غمی", "نشاید که نامت نهند آدمی", "گلستان، باب اول، حکایت ۱۰"),
     ("دوست آن باشد که گیرد دست دوست", "در پریشان‌حالی و درماندگی", "بوستان سعدی"),
 ]
 
-# ================= ۲. توابع کمکی زمان، نگارش فارسی و اصلاح BiDi =================
+# ================= ۲. تقویم شمسی/میلادی، نگارش فارسی و اصلاح BiDi =================
+_FA_DIGITS = "۰۱۲۳۴۵۶۷۸۹"
+JALALI_MONTHS = ["فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور", "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند"]
+GREG_MONTHS_FA = ["ژانویه", "فوریه", "مارس", "آوریل", "مه", "ژوئن", "ژوئیه", "اوت", "سپتامبر", "اکتبر", "نوامبر", "دسامبر"]
+WEEKDAYS_FA_DESC = [
+    "دوشنبه (سومین روز هفته)",
+    "سه‌شنبه (چهارمین روز هفته)",
+    "چهارشنبه (پنجمین روز هفته)",
+    "پنج‌شنبه (ششمین روز هفته)",
+    "جمعه (هفتمین روز هفته)",
+    "شنبه (اولین روز هفته)",
+    "یکشنبه (دومین روز هفته)",
+]
+
+def to_fa_digits(value) -> str:
+    return str(value).translate(str.maketrans("0123456789", _FA_DIGITS))
+
+def gregorian_to_jalali(gy: int, gm: int, gd: int):
+    g_d_m = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+    gy2 = gy + 1 if gm > 2 else gy
+    days = 355666 + (365 * gy) + ((gy2 + 3) // 4) - ((gy2 + 99) // 100) + ((gy2 + 399) // 400) + gd + g_d_m[gm - 1]
+    jy = -1595 + (33 * (days // 12053))
+    days %= 12053
+    jy += 4 * (days // 1461)
+    days %= 1461
+    if days > 365:
+        jy += (days - 1) // 365
+        days = (days - 1) % 365
+    if days < 186:
+        jm = 1 + days // 31
+        jd = 1 + days % 31
+    else:
+        jm = 7 + (days - 186) // 30
+        jd = 1 + (days - 186) % 30
+    return jy, jm, jd
+
+def format_persian_calendar_dates(dt: datetime) -> dict:
+    jy, jm, jd = gregorian_to_jalali(dt.year, dt.month, dt.day)
+    return {
+        "weekday_desc": WEEKDAYS_FA_DESC[dt.weekday()],
+        "jalali": f"{to_fa_digits(jd)} {JALALI_MONTHS[jm - 1]} {to_fa_digits(jy)}",
+        "gregorian": f"{to_fa_digits(dt.day)} {GREG_MONTHS_FA[dt.month - 1]} {to_fa_digits(dt.year)}",
+        "date_key": dt.strftime("%Y-%m-%d"),
+    }
+
 def get_current_tehran_time() -> datetime:
     return datetime.now(ZoneInfo("Asia/Tehran"))
 
@@ -161,12 +241,11 @@ def persian_polish(text: str) -> str:
 
 def fix_bidi_persian(text: str) -> str:
     """
-    تنظیم جهت راست‌به‌چپ در ابتدای هر خط و داخل تگ‌های بلوکی (مثل blockquote)
-    بدون تزریق کاراکتر در وسط یا اطراف کلمات انگلیسی تا هیچ کلمه‌ای نشکند.
+    تنظیم جهت راست‌به‌چپ در ابتدای هر خط بدون دستکاری کلمات انگلیسی و بدون برعکس کردن @jazebestore
     """
     if not text:
         return ""
-    cleaned = text.replace("\u200f", "").replace("\u200e", "")
+    cleaned = text.replace("\u200f", "")
     lines = cleaned.split("\n")
     fixed_lines = []
     for line in lines:
@@ -367,16 +446,160 @@ class MemePick(BaseModel):
     context_persian: str = Field(default="", description="1 short Persian sentence explaining the reference if helpful")
     is_safe_and_funny: bool = False
 
-# ================= ۵. موتور هوش مصنوعی با Cooldown روی 429/503 و تایم‌اوت سخت =================
+# ================= ۵. موتور هوش مصنوعی: Gemini ← Groq ← OpenRouter با تشخیص سهمیه =================
+PROVIDER_CONFIG: dict[str, tuple[list[str], list[str]]] = {
+    "Gemini": (GEMINI_API_KEYS, GEMINI_MODELS),
+    "Groq": (GROQ_API_KEYS, GROQ_MODELS),
+    "OpenRouter": (OPENROUTER_API_KEYS, OPENROUTER_MODELS),
+}
+
+def _now() -> float:
+    return time.time()
+
+def _persist_cooldowns():
+    """ذخیره Cooldownها تا با ری‌استارت Railway دوباره سهمیه‌ی تمام‌شده را امتحان نکنیم."""
+    try:
+        live = {k: v for k, v in provider_cooldowns.items() if v > _now()}
+        set_metadata("provider_cooldowns", json.dumps(live))
+    except Exception:
+        pass
+
+def load_cooldowns():
+    try:
+        data = json.loads(get_metadata("provider_cooldowns", "{}"))
+        for k, v in data.items():
+            if float(v) > _now():
+                provider_cooldowns[k] = float(v)
+    except Exception:
+        pass
+
+def set_cooldown(provider: str, key_idx: int, model: str | None, seconds: int, why: str):
+    """model=None یعنی کل کلید (مثلاً کلید نامعتبر یا سهمیه‌ی روزانه‌ی کل حساب)."""
+    cd_key = f"{provider}:{key_idx}:{model or '*'}"
+    provider_cooldowns[cd_key] = _now() + seconds
+    _persist_cooldowns()
+    mins = max(1, round(seconds / 60))
+    print(f"⏸️ {provider} | کلید #{key_idx} | {model or 'همه مدل‌ها'} برای ~{mins} دقیقه کنار گذاشته شد ({why})")
+
+def _is_cooled(cd_key: str) -> bool:
+    return provider_cooldowns.get(cd_key, 0) > _now()
+
+def _is_available(provider: str, key_idx: int, model: str) -> bool:
+    return not _is_cooled(f"{provider}:{key_idx}:*") and not _is_cooled(f"{provider}:{key_idx}:{model}")
+
+def provider_available_slots(provider: str) -> int:
+    keys, models = PROVIDER_CONFIG[provider]
+    return sum(
+        1
+        for key_idx in range(1, len(keys) + 1)
+        for model in models
+        if _is_available(provider, key_idx, model)
+    )
+
+def provider_status_lines() -> str:
+    lines = []
+    for name in PROVIDER_ORDER:
+        keys, models = PROVIDER_CONFIG[name]
+        total = len(keys) * len(models)
+        lines.append(f"• {name}: {provider_available_slots(name)}/{total} ترکیب کلید×مدل آماده")
+    return "\n".join(lines)
+
+def _secs_until_midnight(tz_name: str) -> int:
+    now = datetime.now(ZoneInfo(tz_name))
+    nxt = (now + timedelta(days=1)).replace(hour=0, minute=2, second=0, microsecond=0)
+    return max(120, int((nxt - now).total_seconds()))
+
+_RETRY_RE = re.compile(
+    r"(?:retrydelay\W+|retry in\s+|try again in\s+|retry after\s+)((?:\d+(?:\.\d+)?\s*(?:ms|h|m|s)\s*)+)",
+    re.I,
+)
+_PART_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(ms|h|m|s)", re.I)
+
+def parse_retry_after(err_str: str) -> float | None:
+    """زمان انتظار پیشنهادی را از متن خطا درمی‌آورد: '34s'، '7m12.5s'، '850ms' ..."""
+    m = _RETRY_RE.search(err_str or "")
+    if not m:
+        return None
+    total = 0.0
+    for val, unit in _PART_RE.findall(m.group(1)):
+        total += float(val) * {"h": 3600, "m": 60, "s": 1, "ms": 0.001}[unit.lower()]
+    return total or None
+
+def classify_api_error(provider: str, exc: Exception) -> tuple[str, str, int]:
+    """خروجی: (نوع خطا، scope = 'model' یا 'key'، ثانیه‌ی Cooldown)"""
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return "timeout", "model", 120
+
+    s = str(exc)
+    low = s.lower()
+    retry = parse_retry_after(s)
+
+    if re.search(r"\b401\b", s) or any(x in low for x in (
+            "api key not valid", "invalid_api_key", "invalid api key", "incorrect api key", "user not found")):
+        return "کلید نامعتبر", "key", 6 * 3600
+    if re.search(r"\b402\b", s) or "insufficient credits" in low or "payment required" in low:
+        return "اعتبار حساب تمام شده", "key", 3 * 3600
+    if re.search(r"\b413\b", s) or "request too large" in low or "too large for model" in low:
+        return "حجم درخواست بیش از حد مجاز مدل", "model", 900
+
+    is_quota = bool(re.search(r"\b429\b", s)) or any(x in low for x in (
+        "resource_exhausted", "resourceexhausted", "rate limit", "rate_limit", "quota"))
+    if is_quota:
+        daily = (
+            any(x in low for x in ("per day", "perday", "per-day", "tokens per day", "requests per day", "daily", "rpd", "tpd"))
+            or bool(re.search(r"limit:\s*0\b", low))
+            or (retry is not None and retry > 3600)
+        )
+        if daily:
+            if provider == "Gemini":
+                secs = _secs_until_midnight("America/Los_Angeles")   # ریست سهمیه‌ی روزانه‌ی Gemini
+            elif provider == "OpenRouter":
+                secs = _secs_until_midnight("UTC")
+            else:
+                secs = int(retry) + 30 if retry else _secs_until_midnight("UTC")
+            scope = "key" if provider == "OpenRouter" else "model"   # سقف روزانه‌ی OpenRouter برای کل حساب است
+            return "سهمیه‌ی روزانه تمام شد", scope, secs
+        return "سهمیه‌ی دقیقه‌ای پر شد", "model", int(min(max((retry or 60) + 3, 20), 900))
+
+    if re.search(r"\b404\b", s) or any(x in low for x in (
+            "not found", "no longer available", "unavailable for free", "not a valid model")):
+        return "مدل در دسترس نیست", "model", 24 * 3600
+    if re.search(r"\b403\b", s) or "permission_denied" in low or "agentic" in low:
+        return "دسترسی به این مدل ممنوع", "model", 6 * 3600
+    if re.search(r"\b(500|502|503|504)\b", s) or any(x in low for x in (
+            "unavailable", "overloaded", "provider returned error", "internal")):
+        return "سرور شلوغ/ناپایدار", "model", 180
+    if re.search(r"\b400\b", s) or "invalid_argument" in low:
+        return "درخواست توسط مدل پذیرفته نشد", "model", 1800
+    return "خطای نامشخص یا خروجی نامعتبر", "model", 120
+
+def _handle_failure(provider: str, key_idx: int, model_name: str, exc: Exception):
+    kind, scope, secs = classify_api_error(provider, exc)
+    set_cooldown(provider, key_idx, None if scope == "key" else model_name, secs, kind)
+    print(f"⚠️ خطا در {provider} ({model_name} | کلید #{key_idx}): {str(exc)[:140]}")
+
+def extract_json_text(content: str) -> str:
+    content = re.sub(r"<think>.*?</think>", "", content or "", flags=re.S | re.I).strip()
+    content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content).strip()
+    start, end = content.find("{"), content.rfind("}")
+    if start != -1 and end > start:
+        return content[start:end + 1]
+    return content or "{}"
+
 async def call_gemini_json(prompt: str, schema_cls, temperature: float = 0.25):
-    now_ts = datetime.now().timestamp()
-    for key_idx, api_key in enumerate(GEMINI_API_KEYS, start=1):
-        client = genai.Client(api_key=api_key)
-        for model_name in GEMINI_MODELS:
-            cd_key = f"gemini:{key_idx}:{model_name}"
-            if provider_cooldowns.get(cd_key, 0) > now_ts:
+    if not GEMINI_API_KEYS:
+        print("ℹ️ کلیدی برای Gemini ثبت نشده؛ انتقال به Groq...")
+        return None
+    clients: dict[int, genai.Client] = {}
+    for model_name in GEMINI_MODELS:
+        for key_idx, api_key in enumerate(GEMINI_API_KEYS, start=1):
+            if not _is_available("Gemini", key_idx, model_name):
                 continue
+            if key_idx not in clients:
+                clients[key_idx] = genai.Client(api_key=api_key)
+            client = clients[key_idx]
             try:
+                print(f"🤖 تلاش با Gemini ({model_name} | کلید #{key_idx})...")
                 resp = await asyncio.wait_for(
                     asyncio.to_thread(
                         client.models.generate_content,
@@ -388,71 +611,80 @@ async def call_gemini_json(prompt: str, schema_cls, temperature: float = 0.25):
                             temperature=temperature
                         )
                     ),
-                    timeout=45.0
+                    timeout=60.0
                 )
-                raw = json.loads(resp.text)
-                return schema_cls.model_validate(raw)
+                validated = schema_cls.model_validate(json.loads(extract_json_text(resp.text)))
+                print(f"✅ موفقیت با Gemini ({model_name} | کلید #{key_idx})")
+                return validated
             except Exception as e:
-                err_str = str(e)
-                if any(code in err_str for code in ("429", "503", "ResourceExhausted", "UNAVAILABLE")):
-                    cd_sec = 1800 if "429" in err_str else 300
-                    provider_cooldowns[cd_key] = now_ts + cd_sec
-                print(f"⚠️ خطا در Gemini ({model_name} | کلید #{key_idx}): {err_str[:140]}")
+                _handle_failure("Gemini", key_idx, model_name, e)
     return None
 
 async def call_openai_compat_json(provider: str, base_url: str, keys: list[str], models: list[str], prompt: str, schema_cls, temperature: float = 0.25):
-    now_ts = datetime.now().timestamp()
+    if not keys:
+        print(f"ℹ️ کلیدی برای {provider} در متغیرهای Railway یافت نشد؛ عبور...")
+        return None
     clean_base = sanitize_plain_url(base_url)
     schema_hint = json.dumps(schema_cls.model_json_schema(), ensure_ascii=False)
-    for key_idx, api_key in enumerate(keys, start=1):
-        http_client = httpx.AsyncClient(http2=False, trust_env=False, timeout=45.0)
-        client = AsyncOpenAI(api_key=api_key, base_url=clean_base, http_client=http_client)
-        try:
-            for model_name in models:
-                cd_key = f"{provider}:{key_idx}:{model_name}"
-                if provider_cooldowns.get(cd_key, 0) > now_ts:
-                    continue
-                try:
-                    comp = await asyncio.wait_for(
-                        client.chat.completions.create(
-                            model=model_name,
-                            messages=[
-                                {"role": "system", "content": f"Return ONLY valid JSON matching this schema:\n{schema_hint}"},
-                                {"role": "user", "content": prompt}
-                            ],
-                            response_format={"type": "json_object"},
-                            temperature=temperature
-                        ),
-                        timeout=45.0
-                    )
-                    content = comp.choices[0].message.content or "{}"
-                    content = re.sub(r"^```json\s*|\s*```$", "", content.strip())
-                    return schema_cls.model_validate(json.loads(content))
-                except Exception as e:
-                    err_str = str(e)
-                    if any(code in err_str for code in ("429", "503", "UNAVAILABLE")):
-                        provider_cooldowns[cd_key] = now_ts + (1800 if "429" in err_str else 300)
-                    print(f"⚠️ خطا در {provider} ({model_name} | کلید #{key_idx}): {err_str[:140]}")
-        finally:
-            await http_client.aclose()
+    extra_headers = {"HTTP-Referer": STORE_BASE_URL, "X-Title": "Jazebe Store News Bot"} if provider == "OpenRouter" else None
+
+    for model_name in models:
+        for key_idx, api_key in enumerate(keys, start=1):
+            if not _is_available(provider, key_idx, model_name):
+                continue
+            http_client = httpx.AsyncClient(http2=False, trust_env=False, timeout=60.0)
+            client = AsyncOpenAI(
+                api_key=api_key, base_url=clean_base, http_client=http_client,
+                max_retries=0,
+                default_headers=extra_headers
+            )
+            try:
+                print(f"🤖 تلاش با {provider} ({model_name} | کلید #{key_idx})...")
+                kwargs = {
+                    "model": model_name,
+                    "messages": [
+                        {"role": "system", "content": f"Return ONLY valid JSON matching this schema:\n{schema_hint}"},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": temperature
+                }
+                if provider == "Groq":
+                    kwargs["response_format"] = {"type": "json_object"}
+                comp = await asyncio.wait_for(client.chat.completions.create(**kwargs), timeout=60.0)
+                if not comp.choices:
+                    raise RuntimeError(f"empty response: {getattr(comp, 'error', None)}")
+                content = comp.choices[0].message.content or ""
+                if not content.strip():
+                    raise RuntimeError("empty content")
+                validated = schema_cls.model_validate(json.loads(extract_json_text(content)))
+                print(f"✅ موفقیت با {provider} ({model_name} | کلید #{key_idx})")
+                return validated
+            except Exception as e:
+                _handle_failure(provider, key_idx, model_name, e)
+            finally:
+                await http_client.aclose()
     return None
 
 async def ask_structured_ai(prompt: str, schema_cls, temperature: float = 0.25):
-    res = await call_gemini_json(prompt, schema_cls, temperature)
-    if res:
-        return res
-    if GROQ_API_KEYS:
-        res = await call_openai_compat_json(
-            "Groq", "https://api.groq.com/openai/v1", GROQ_API_KEYS, GROQ_MODELS, prompt, schema_cls, temperature
-        )
+    callers = {
+        "Gemini": lambda: call_gemini_json(prompt, schema_cls, temperature),
+        "Groq": lambda: call_openai_compat_json(
+            "Groq", GROQ_BASE_URL, GROQ_API_KEYS, GROQ_MODELS, prompt, schema_cls, temperature),
+        "OpenRouter": lambda: call_openai_compat_json(
+            "OpenRouter", OPENROUTER_BASE_URL, OPENROUTER_API_KEYS, OPENROUTER_MODELS, prompt, schema_cls, temperature),
+    }
+    for name in PROVIDER_ORDER:
+        keys, _models = PROVIDER_CONFIG[name]
+        if not keys:
+            continue
+        if provider_available_slots(name) == 0:
+            print(f"⏭️ سهمیه/ظرفیت {name} فعلاً تمام است؛ رفتن به سرویس بعدی...")
+            continue
+        res = await callers[name]()
         if res:
             return res
-    if OPENROUTER_API_KEYS:
-        res = await call_openai_compat_json(
-            "OpenRouter", "https://openrouter.ai/api/v1", OPENROUTER_API_KEYS, OPENROUTER_MODELS, prompt, schema_cls, temperature
-        )
-        if res:
-            return res
+        print(f"↪️ {name} پاسخی نداد؛ انتقال به سرویس بعدی...")
+    print("❌ هیچ‌کدام از سرویس‌های AI (Gemini / Groq / OpenRouter) در این لحظه پاسخ ندادند.")
     return None
 
 # ================= ۶. دریافت فیدهای RSS و استخراج متن کامل مقاله =================
@@ -789,7 +1021,7 @@ STRICT PERSIAN JOURNALISTIC WRITING & ACCURACY RULES:
    - Use natural Persian idioms (e.g., «صف بررسی بازی‌های Steam» instead of «پشت‌سرگیری بررسی‌ها»; «محتوای ساخته‌شده با هوش مصنوعی» instead of «ارسال‌های AI»; «مهار و بازیابی مرحله بالایی Starship» instead of «گرفتن مرحله بالایی»).
 2. START EVERY HEADLINE & SENTENCE WITH A PERSIAN WORD:
    - Never start `headline_persian` or `summary_persian` with an English word (e.g., write «تلاش بی‌سابقه SpaceX برای...» instead of «SpaceX برای اولین بار...»).
-   - Keep brand names, game titles, and hardware models in exact English (e.g., Grand Theft Auto 6, SpaceX, Steam, BMO Capital Markets).
+   - Keep brand names, game titles, and hardware models in exact English.
 3. FINANCIAL & FACTUAL PRECISION (CRITICAL):
    - Never present analyst price assumptions or Average Selling Price (ASP) estimates as official confirmed prices! Always write «بر اساس برآورد/فرض تحلیلگران مؤسسه X، قیمت پایه حدود ۸۰ دلار پیش‌بینی شده است» instead of stating it as a confirmed retail fact.
    - Include concrete numbers, release windows, and direct attributions from `full_article_text`.
@@ -1040,7 +1272,7 @@ Select the ONE candidate that is genuinely funny, witty, and relatable for a Per
         except Exception as e:
             print(f"⚠️ خطا در ارسال میم کاربران: {e}")
 
-# ================= ۹. پست صبحگاهی تقویم و شعر سعدی + مرور تحلیلی شبانه =================
+# ================= ۹. پست صبحگاهی تقویم و کلام سعدی (قالب اصلی کانال) + مرور تحلیلی شبانه =================
 async def fetch_saadi_verse(session: aiohttp.ClientSession) -> dict:
     base = "https://api.ganjoor.net/api/ganjoor"
     try:
@@ -1056,35 +1288,40 @@ async def fetch_saadi_verse(session: aiohttp.ClientSession) -> dict:
                 if a.get("versePosition") == 0 and b.get("versePosition") == 1:
                     m1, m2 = (a.get("text") or "").strip(), (b.get("text") or "").strip()
                     if 8 <= len(m1) <= 90 and 8 <= len(m2) <= 90:
+                        raw_title = (poem.get("fullTitle") or "دیوان سعدی").replace("»", "،").strip()
                         return {
                             "m1": persian_polish(m1),
                             "m2": persian_polish(m2),
-                            "title": poem.get("fullTitle") or "دیوان سعدی",
+                            "title": f"سعدی شیرازی | {raw_title}",
                             "url": sanitize_plain_url("https://ganjoor.net" + full_url)
                         }
     except Exception:
         pass
     m1, m2, title = random.choice(FALLBACK_VERSES)
-    return {"m1": m1, "m2": m2, "title": title, "url": "https://ganjoor.net/saadi"}
+    return {"m1": m1, "m2": m2, "title": f"سعدی شیرازی | {title}", "url": "https://ganjoor.net/saadi"}
 
 async def publish_daily_calendar_post_if_due(session: aiohttp.ClientSession):
     tehran_now = get_current_tehran_time()
     if tehran_now.hour != DAILY_CALENDAR_HOUR:
         return
-    today_str = tehran_now.strftime("%Y-%m-%d")
+    dates = format_persian_calendar_dates(tehran_now)
+    today_str = dates["date_key"]
     if get_metadata("last_calendar_date") == today_str:
         return
 
     beit = await fetch_saadi_verse(session)
     lines = [
-        "📅 <b>تقویم امروز و شعر صبحگاهی</b>",
-        f"🗓 تاریخ میلادی: {today_str}",
+        "🗓 <b>تقویم امروز و کلام سعدی</b>",
+        f"📅 امروز: <b>{dates['weekday_desc']}</b>",
+        f"☀️ تاریخ شمسی: <b>{dates['jalali']}</b>",
+        f"🌍 تاریخ میلادی: <b>{dates['gregorian']}</b>",
         "",
-        f"📜 <b>بیتی از سعدی ({html.escape(beit['title'])}):</b>",
+        "📜 <b>بیتی از سعدی</b>",
         f"<blockquote>{html.escape(beit['m1'])}\n{html.escape(beit['m2'])}</blockquote>",
-        f"\n🏷 #تقویم_روز #سعدی{CHANNEL_SIGNATURE}"
+        f"✍️ {html.escape(beit['title'])}",
+        f"\n🏷 #تقویم_روز #سعدی #شعر_فارسی{CHANNEL_SIGNATURE}"
     ]
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton("📜 خواندن شعر کامل", url=beit["url"])]])
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("📜 خواندن شعر کامل در گنجور", url=beit["url"])]])
     try:
         msg = await bot.send_message(
             chat_id=TARGET_CHANNEL,
@@ -1234,16 +1471,16 @@ async def handle_status_command(update: Update, context: ContextTypes.DEFAULT_TY
     conn.close()
 
     report = (
-        f"📊 <b>وضعیت ربات تحریریه @jazebestore</b>\n"
+        f"📊 <b>وضعیت ربات تحریریه {LRM}@jazebestore{LRM}</b>\n"
+        f"• کلیدهای فعال: Gemini ({len(GEMINI_API_KEYS)}) | Groq ({len(GROQ_API_KEYS)}) | OpenRouter ({len(OPENROUTER_API_KEYS)})\n"
+        f"{provider_status_lines()}\n"
         f"• اخبار منتشرشده در ۲۴ ساعت اخیر: <b>{pub_24h}</b>\n"
         f"• اخبار در صف بررسی: <b>{pending_cnt}</b>\n"
-        f"• حالت چرخه عادی: هر ۱ ساعت (حداکثر {MAX_NEWS_PER_CYCLE} خبر باکیفیت)\n"
-        f"• آخرین میم ارسالی: {get_metadata('last_meme_ts', 'ثبت نشده')}"
+        f"• حالت چرخه عادی: هر ۱ ساعت (حداکثر {MAX_NEWS_PER_CYCLE} خبر باکیفیت)"
     )
     await update.message.reply_text(fix_bidi_persian(report), parse_mode="HTML")
 
 async def handle_correct_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ارسال اصلاحیه رسمی برای یک خبر منتشرشده توسط ادمین"""
     if ADMIN_USER_ID and update.effective_user.id != ADMIN_USER_ID:
         return
     if not context.args or len(context.args) < 2:
@@ -1281,7 +1518,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 async def _run_single_cycle(shared_session: aiohttp.ClientSession, last_regular_ts: float) -> float:
     now_ts = datetime.now().timestamp()
     tehran_str = get_current_tehran_time().strftime("%Y-%m-%d %H:%M")
-    print(f"💓 Heartbeat | {tehran_str} تهران")
+    print(f"💓 Heartbeat | {tehran_str} تهران | کلیدها: Gemini={len(GEMINI_API_KEYS)}, Groq={len(GROQ_API_KEYS)}, OR={len(OPENROUTER_API_KEYS)}")
 
     await collect_all_feeds(shared_session)
     await process_and_publish_batch(shared_session, breaking_only=True)
@@ -1298,6 +1535,7 @@ async def _run_single_cycle(shared_session: aiohttp.ClientSession, last_regular_
 
 async def background_news_loop():
     init_db()
+    load_cooldowns()
     last_regular_ts = 0.0
     connector = aiohttp.TCPConnector(ssl=False, limit=20)
     async with aiohttp.ClientSession(connector=connector) as shared_session:
@@ -1305,10 +1543,10 @@ async def background_news_loop():
             try:
                 last_regular_ts = await asyncio.wait_for(
                     _run_single_cycle(shared_session, last_regular_ts),
-                    timeout=180.0
+                    timeout=420.0
                 )
             except asyncio.TimeoutError:
-                print("⏱️ هشدار: اجرای چرخه بیش از ۳ دقیقه طول کشید و ریست شد؛ ادامه در نوبت بعد...")
+                print("⏱️ هشدار: اجرای چرخه بیش از ۷ دقیقه طول کشید و ریست شد؛ ادامه در نوبت بعد...")
             except Exception as loop_err:
                 print(f"⚠️ خطا در حلقه اصلی ربات: {loop_err}")
 
